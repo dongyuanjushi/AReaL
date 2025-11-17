@@ -21,6 +21,7 @@ from areal.utils.functional import (
     reward_overlong_penalty,
 )
 from areal.utils.perf_tracer import trace_perf
+from areal.utils.tree_training import packed_tree_gather_logprobs
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class PPOActor:
         self.dynamic_sampling = config.dynamic_sampling
 
         self.m2_threshold = config.m2_threshold
+        self.enable_tree_training = config.megatron.enable_tree_training
 
         # Log critical GSPO/GRPO configuration for reproducibility
         logger.info("PPOActor Configuration:")
@@ -85,7 +87,7 @@ class PPOActor:
         self.engine.eval()
         return self.engine.forward(
             input_=data,
-            post_hook=calc_logprobs,
+            post_hook=calc_logprobs if not self.enable_tree_training else packed_tree_gather_logprobs,
             aggregate_fn=lambda xs: torch.cat(xs, dim=-1),
         )
 
@@ -286,6 +288,7 @@ class PPOActor:
                         behav_imp_weight_cap=self.config.behav_imp_weight_cap,
                         m2_threshold=self.m2_threshold,
                         importance_sampling_level=self.config.importance_sampling_level,
+                        enable_tree_training=self.enable_tree_training,
                     ),
                     loss_weight_fn=lambda x: x["loss_mask"].count_nonzero(),
                 )
@@ -336,21 +339,31 @@ def grpo_loss_fn(
     behav_imp_weight_cap: float | None,
     m2_threshold: float | None = None,
     importance_sampling_level: str = "token",
+    enable_tree_training: bool = False,
 ):
     """Loss function for actor step, all inputs should be splitted into
     pipeline micro batches, returns loss and logging stats."""
     # Use rolled input_ids. Ulysses SP will roll input_ids in ulysses_prepare_inputs().
-    labels = input_data.get(
-        "rolled_input_ids",
-        torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
-    )
     old_logp = input_data["logprobs"]
     advantages = input_data["advantages"]
     # Use full loss_mask. Ulysses SP will slice loss_mask in ulysses_prepare_inputs().
     loss_mask = input_data.get("full_loss_mask", input_data["loss_mask"]).bool()
     prox_logp = input_data["prox_logp"]
 
-    logprobs, entropy = gather_logprobs_entropy(logits, labels, temperature)
+    if enable_tree_training:
+        logprobs, entropy = packed_tree_gather_logprobs(
+            logits,
+            input_data["input_ids"],
+            input_data["sequence_indices"],
+            temperature,
+            calculate_entropy=True,
+        )
+    else:
+        labels = input_data.get(
+            "rolled_input_ids",
+            torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
+        )
+        logprobs, entropy = gather_logprobs_entropy(logits, labels, temperature)
     entropy = entropy.detach()
 
     # If m2_threshold is set, use M2PO loss function.

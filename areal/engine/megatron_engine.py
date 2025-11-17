@@ -65,7 +65,12 @@ from areal.utils.megatron_checkpointer import MegatronCheckpointManager
 from areal.utils.model import disable_dropout_in_model
 from areal.utils.nccl import NCCL_DEFAULT_TIMEOUT
 from areal.utils.perf_tracer import trace_perf, trace_scope
-
+from areal.utils.tree_training import (
+    build_tree_input, 
+    patch_bridge_for_tree_training, 
+    model_with_tree_attention_forward,
+    amend_packed_tree_position_ids,
+)
 
 class _MegatronModelList(list):
     """List wrapper that exposes module-like helpers for Megatron model chunks."""
@@ -113,6 +118,7 @@ class MegatronEngine(TrainEngine):
         self.checkpointer = None
         self.seed = 0
         self.own_global_group = False
+        self.enable_tree_training = config.megatron.enable_tree_training
 
     def initialize(
         self,
@@ -121,6 +127,8 @@ class MegatronEngine(TrainEngine):
         parallel_strategy: ParallelStrategy,
         seed: int = 0,
     ):
+        # TODO: When using tree training, we cannot use mbridge to initialize megatron model.
+        # We have to change the module specs for megatron attention modules to enable arbitrary attention masks.
         if self.parallel_strategy is None:
             self.parallel_strategy = self._make_parallel_strategy(parallel_strategy)
         self.seed = seed
@@ -141,6 +149,9 @@ class MegatronEngine(TrainEngine):
 
         self.tokenizer = load_hf_tokenizer(self.config.path)
         self.bridge = mbridge.AutoBridge.from_pretrained(self.config.path)
+        if self.enable_tree_training:
+            patch_bridge_for_tree_training(self.bridge)
+
         self.bridge.dtype = self.dtype
         # Set gradient checkpointing options
         if self.config.gradient_checkpointing:
@@ -159,7 +170,6 @@ class MegatronEngine(TrainEngine):
         self.hf_config, self.tf_config = make_hf_and_mcore_config(
             self.config.path, dtype=self.dtype, bridge=self.bridge
         )
-        # TODO: configure for VPP
         self.tf_config = configure_pipeline_layer_splits(
             self.parallel_strategy, self.hf_config, self.tf_config
         )
@@ -856,6 +866,39 @@ class MegatronEngine(TrainEngine):
             max_workers=None,
         )
 
+    def prepare_tree_mb_list(self, input_: dict[str, Any]) -> MicroBatchList:
+        # TODO: 1. Group and pack data into a token tree and attention masks for model input
+        # In the first step we only use a naive greedy packing strategy to make sure the 
+        # tree size does not exceed max_tokens_per_mb
+        # 2. Correction on position ids for token trees
+
+        # entries in input_: attention_mask, input_ids of shape [b, s]
+        tree_roots, num_tree_tokens, tree_input = build_tree_input(input_, self.config.mb_spec.max_tokens_per_mb)
+        input_.update(tree_input)
+        amend_packed_tree_position_ids(input_)
+
+        pp_size = self.parallel_strategy.pipeline_parallel_size
+        cp_size = self.parallel_strategy.context_parallel_size
+        tp_size = self.parallel_strategy.tensor_parallel_size
+
+        # TODO: fix this, pad for context parallelism
+        assert cp_size == 1
+        
+        # currently, we take a token tree as a micro-batch for concept proof
+        # TODO: batch multiple token trees into a micro-batch
+        if len(tree_input) < 2 * pp_size:
+            self.logger.warning("Number of token trees less than 2 * pp_size, may cause large pipeline bubbles.")
+
+        return MicroBatchList(
+            data=input_,
+            mb_spec=self.config.mb_spec,
+            mbs=input_,
+            forward_indices=list(range(sum(num_tree_tokens))),
+            backward_indices=list(range(sum(num_tree_tokens))),
+            group_lens=num_tree_tokens,
+        )
+    
+
     def prepare_mb_list(self, input_: dict[str, Any]) -> MicroBatchList:
         assert "attention_mask" in input_ and "input_ids" in input_
         input_ = amend_position_ids(input_)
@@ -933,7 +976,10 @@ class MegatronEngine(TrainEngine):
         for model in self.model:
             model.zero_grad_buffer()
         # Assume input_ is identical across context and model parallel group
-        mb_list = self.prepare_mb_list(input_)
+        if self.enable_tree_training:
+            mb_list = self.prepare_tree_mb_list(input_)
+        else:
+            mb_list = self.prepare_mb_list(input_)
         mb_list = mb_list.to(self.device)
 
         total_loss_weight = (
@@ -955,23 +1001,34 @@ class MegatronEngine(TrainEngine):
             batch = next(batch_iter)
             model_vp_stage = getattr(model, "vp_stage", 0)
             forward_step_count = forward_step_counts[model_vp_stage]
-            padding_length = mb_list.padding_lengths[forward_step_count]
-            orig_input = mb_list.mbs[forward_step_count]
-            cu_seqlens = batch["cu_seqlens"]
-            old_cu_seqlens = mb_list.old_cu_seqlens_list[forward_step_count]
 
-            forward_step_counts[model_vp_stage] += 1
-            output = packed_context_parallel_forward(model, batch)
+            if self.enable_tree_training:
+                # TODO: Three choices strategies for gradient correction: 
+                # 1. unpack output logits to flattened sequences for loss calculation, 
+                # which might consume too much GPU memory.
+                # 2. change loss_fn to unpack logprobs from a tree structure to flattened sequences.
+                # 3. scale gradients directly, which is ugly.
+                # Try option 2 first for simplicity.
+                output = model_with_tree_attention_forward(model, batch)
+            else:
+                padding_length = mb_list.padding_lengths[forward_step_count]
+                orig_input = mb_list.mbs[forward_step_count]
+                cu_seqlens = batch["cu_seqlens"]
+                old_cu_seqlens = mb_list.old_cu_seqlens_list[forward_step_count]
 
-            if mpu.is_pipeline_last_stage(
-                ignore_virtual=False, vp_stage=model_vp_stage
-            ):
-                output = unpad_logits(
-                    output,
-                    padding_length=padding_length,
-                    cu_seqlens=cu_seqlens,
-                    old_cu_seqlens=old_cu_seqlens,
-                )
+                forward_step_counts[model_vp_stage] += 1
+                output = packed_context_parallel_forward(model, batch)
+
+                if mpu.is_pipeline_last_stage(
+                    ignore_virtual=False, vp_stage=model_vp_stage
+                ):
+                    output = unpad_logits(
+                        output,
+                        padding_length=padding_length,
+                        cu_seqlens=cu_seqlens,
+                        old_cu_seqlens=old_cu_seqlens,
+                    )
+
 
             def _scaled_loss_fn(input_, output):
                 loss = loss_fn(output, input_)
@@ -1021,6 +1078,8 @@ class MegatronEngine(TrainEngine):
         loss_fn: Callable[[torch.Tensor, dict[str, Any]], torch.Tensor],
         loss_weight_fn: Callable[[dict[str, Any]], torch.Tensor],
     ) -> torch.Tensor | None:
+        # TODO: do not modify eval_batch for tree training now, only useful in SFT.
+        assert self.enable_tree_training is False, "Tree training eval_batch not implemented yet."
         assert self.model is not None, "Model is not initialized."
         # Assume input_ is identical across context and model parallel group
         mb_list = self.prepare_mb_list(input_)
@@ -1106,7 +1165,10 @@ class MegatronEngine(TrainEngine):
         assert self.model is not None, "Model is not initialized."
         # Assume input_ is identical across context and model parallel group
         cu_seqlens = pack_tensor_dict(input_)["cu_seqlens"]
-        mb_list = self.prepare_mb_list(input_)
+        if self.enable_tree_training:
+            mb_list = self.prepare_tree_mb_list(input_)
+        else:
+            mb_list = self.prepare_mb_list(input_)
         mb_list = mb_list.to(self.device)
 
         # NOTE: Move tensors to correct device, since dist.broadcast_object_list does not
@@ -1127,23 +1189,26 @@ class MegatronEngine(TrainEngine):
             batch = next(batch_iter)
             model_vp_stage = getattr(model, "vp_stage", 0)
             forward_step_count = forward_step_counts[model_vp_stage]
-            padding_length = mb_list.padding_lengths[forward_step_count]
-            orig_input = mb_list.mbs[forward_step_count]
-            cu_seqlens = batch["cu_seqlens"]
-            old_cu_seqlens = mb_list.old_cu_seqlens_list[forward_step_count]
+            if self.enable_tree_training:
+                output = model_with_tree_attention_forward(model, batch)
+            else:
+                padding_length = mb_list.padding_lengths[forward_step_count]
+                orig_input = mb_list.mbs[forward_step_count]
+                cu_seqlens = batch["cu_seqlens"]
+                old_cu_seqlens = mb_list.old_cu_seqlens_list[forward_step_count]
 
-            forward_step_counts[model_vp_stage] += 1
-            output = packed_context_parallel_forward(model, batch)
+                forward_step_counts[model_vp_stage] += 1
+                output = packed_context_parallel_forward(model, batch)
 
-            if mpu.is_pipeline_last_stage(
-                ignore_virtual=False, vp_stage=model_vp_stage
-            ):
-                output = unpad_logits(
-                    output,
-                    padding_length=padding_length,
-                    cu_seqlens=cu_seqlens,
-                    old_cu_seqlens=old_cu_seqlens,
-                )
+                if mpu.is_pipeline_last_stage(
+                    ignore_virtual=False, vp_stage=model_vp_stage
+                ):
+                    output = unpad_logits(
+                        output,
+                        padding_length=padding_length,
+                        cu_seqlens=cu_seqlens,
+                        old_cu_seqlens=old_cu_seqlens,
+                    )
 
             def _post_process_fn(input_, output):
                 loss = torch.tensor(1.0, device=output.device)
@@ -1185,4 +1250,5 @@ class MegatronEngine(TrainEngine):
             src_rank=mpu.get_pipeline_model_parallel_last_rank(),
             group=mpu.get_pipeline_model_parallel_group(),
         )
+        # TODO: recover packed trees for adv computation
         return result
