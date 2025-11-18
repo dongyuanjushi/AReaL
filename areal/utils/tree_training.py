@@ -815,6 +815,12 @@ def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]
     input_ids = tree_input["input_ids"]
     attention_mask = tree_input["attention_mask"]
     position_ids = tree_input["position_ids"]
+    
+    # Transformer Engine expects True where values should be masked out.
+    attention_mask = (~attention_mask).unsqueeze(0).unsqueeze(0)
+    # Add batch dimension for input_ids and position_ids
+    input_ids = input_ids.unsqueeze(0)
+    position_ids = position_ids.unsqueeze(0)
     output = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
