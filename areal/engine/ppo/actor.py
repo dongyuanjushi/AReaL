@@ -54,6 +54,10 @@ class PPOActor:
 
         self.m2_threshold = config.m2_threshold
         self.enable_tree_training = config.megatron.enable_tree_training
+        if self.enable_tree_training and not isinstance(engine, MegatronEngine):
+            raise RuntimeError(
+                "Tree training is only supported with MegatronEngine."
+            )
 
         # Log critical GSPO/GRPO configuration for reproducibility
         logger.info("PPOActor Configuration:")
