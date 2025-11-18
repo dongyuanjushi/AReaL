@@ -874,8 +874,13 @@ class MegatronEngine(TrainEngine):
 
         # entries in input_: attention_mask, input_ids of shape [b, s]
         tree_roots, num_tree_tokens, tree_input_mbs = build_tree_input(input_, self.config.mb_spec.max_tokens_per_mb)
-        for tree_input in tree_input_mbs:
+        for num_tokens, tree_input in zip(num_tree_tokens, tree_input_mbs):
             amend_packed_tree_position_ids(tree_input)
+            # TODO: These are not necessary for tree input. 
+            # They are only here because of forward/train_batch implementation 
+            # Remove them when clearing code
+            tree_input["cu_seqlens"] = torch.tensor([0, num_tokens], device=tree_input["input_ids"].device)
+            tree_input["max_seqlen"] = num_tokens 
 
         pp_size = self.parallel_strategy.pipeline_parallel_size
         cp_size = self.parallel_strategy.context_parallel_size
@@ -896,6 +901,7 @@ class MegatronEngine(TrainEngine):
             forward_indices=list(range(sum(num_tree_tokens))),
             backward_indices=list(range(sum(num_tree_tokens))),
             group_lens=num_tree_tokens,
+            padded_mbs=tree_input_mbs,
         )
     
 
