@@ -422,7 +422,7 @@ def grpo_loss_fn(
         dual_clipped_tokens=stat["dual_clip_mask"],
     )
     if enable_tree_training:
-        n_tree_tokens = logprobs.shape[0]
+        n_tree_tokens = logits.shape[0]
         stats_tracker.denominator(
             n_tree_tokens=torch.ones(
                 n_tree_tokens, dtype=torch.bool, device=logits.device
