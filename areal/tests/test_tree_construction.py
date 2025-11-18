@@ -114,6 +114,45 @@ def test_build_tree_input_constructs_tree_packed_batches():
     assert tree_batch["sequence_indices"] == expected_sequence_indices
 
 
+def test_build_tree_input_packs_additional_tensor_fields():
+    sequences = [[1, 2, 3], [1, 2, 4], [1, 5]]
+    data = _build_data(sequences)
+
+    extra_tensor = torch.tensor(
+        [
+            [10.0, 11.0, 12.0],
+            [20.0, 21.0, 22.0],
+            [30.0, 31.0, 32.0],
+        ]
+    )
+    data["extra"] = extra_tensor
+    data["non_pack_tensor"] = torch.tensor([1.0, 2.0, 3.0])
+    data["meta"] = {"note": "keep"}
+
+    _, _, packed = build_tree_input(data, max_tokens_per_tree=5)
+    tree_batch = packed[0]
+
+    expected_extra = torch.tensor([10.0, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0])
+    assert torch.allclose(tree_batch["extra"], expected_extra)
+
+    assert torch.equal(tree_batch["non_pack_tensor"], data["non_pack_tensor"])
+    assert tree_batch["meta"] == data["meta"]
+
+
+def test_build_tree_input_packed_tensor_fields_with_empty_sequence():
+    sequences = [[]]
+    data = _build_data(sequences)
+
+    extra_tensor = torch.zeros_like(data["input_ids"], dtype=torch.float32)
+    data["extra"] = extra_tensor
+
+    _, _, packed = build_tree_input(data, max_tokens_per_tree=2)
+    tree_batch = packed[0]
+
+    assert tree_batch["extra"].numel() == 0
+    assert tree_batch["extra"].dtype == torch.float32
+
+
 def test_build_tree_input_sequence_indices_with_multiple_trees():
     sequences = [[1, 2], [3, 4], [1, 5], [6]]
     data = _build_data(sequences)

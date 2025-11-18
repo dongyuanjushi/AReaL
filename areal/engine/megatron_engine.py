@@ -874,8 +874,7 @@ class MegatronEngine(TrainEngine):
 
         # entries in input_: attention_mask, input_ids of shape [b, s]
         tree_roots, num_tree_tokens, tree_input = build_tree_input(input_, self.config.mb_spec.max_tokens_per_mb)
-        input_.update(tree_input)
-        amend_packed_tree_position_ids(input_)
+        amend_packed_tree_position_ids(tree_input)
 
         pp_size = self.parallel_strategy.pipeline_parallel_size
         cp_size = self.parallel_strategy.context_parallel_size
@@ -892,7 +891,7 @@ class MegatronEngine(TrainEngine):
         return MicroBatchList(
             data=input_,
             mb_spec=self.config.mb_spec,
-            mbs=input_,
+            mbs=tree_input,
             forward_indices=list(range(sum(num_tree_tokens))),
             backward_indices=list(range(sum(num_tree_tokens))),
             group_lens=num_tree_tokens,
