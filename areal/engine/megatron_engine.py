@@ -893,6 +893,8 @@ class MegatronEngine(TrainEngine):
         # TODO: batch multiple token trees into a micro-batch
         if len(tree_input_mbs) < 2 * pp_size:
             self.logger.warning("Number of token trees less than 2 * pp_size, may cause large pipeline bubbles.")
+        
+        self.logger.info(f"#trees: {len(num_tree_tokens)}, tree #tokens: {num_tree_tokens}.")
 
         return MicroBatchList(
             data=input_,
