@@ -70,6 +70,7 @@ from areal.utils.tree_training import (
     patch_bridge_for_tree_training, 
     model_with_tree_attention_forward,
     amend_packed_tree_position_ids,
+    recover_packed_tensor_list,
 )
 
 class _MegatronModelList(list):
@@ -1250,11 +1251,22 @@ class MegatronEngine(TrainEngine):
 
         result = None
         if mpu.is_pipeline_last_stage():
-            res = aggregate_fn([o["output"] for o in output_list])
-            output_seqlens = [output_seqlens[i] for i in mb_list.forward_indices]
-            unpacked = unpack_sequence(res, lens=output_seqlens, dim=0)
-            reordered = reorder_list(unpacked, mb_list.backward_indices)
-            result = pad_and_stack_tensors_along_first_dim(reordered)
+            # TODO: recover packed trees for adv computation
+            if self.enable_tree_training:
+                tensor_list = [o["output"] for o in output_list]
+                sequence_indices_list = [mb["sequence_indices"] for mb in mb_list.padded_mbs]
+                sequence_ids_list = [mb["sequence_ids"] for mb in mb_list.padded_mbs]
+                result = recover_packed_tensor_list(
+                    tensor_list, 
+                    sequence_indices_list, 
+                    sequence_ids_list
+                )
+            else:
+                res = aggregate_fn([o["output"] for o in output_list])
+                output_seqlens = [output_seqlens[i] for i in mb_list.forward_indices]
+                unpacked = unpack_sequence(res, lens=output_seqlens, dim=0)
+                reordered = reorder_list(unpacked, mb_list.backward_indices)
+                result = pad_and_stack_tensors_along_first_dim(reordered)
 
         # Broadcast the shape of the result tensor
         result = broadcast_tensor(
@@ -1262,5 +1274,4 @@ class MegatronEngine(TrainEngine):
             src_rank=mpu.get_pipeline_model_parallel_last_rank(),
             group=mpu.get_pipeline_model_parallel_group(),
         )
-        # TODO: recover packed trees for adv computation
         return result

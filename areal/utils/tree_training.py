@@ -4,6 +4,7 @@ import torch
 
 from areal.utils import logging
 from areal.utils.functional import gather_logprobs, gather_logprobs_entropy
+from areal.utils.data import pad_and_stack_tensors_along_first_dim
 
 logger = logging.getLogger("Tree Training")
 
@@ -316,6 +317,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             "tokens": tokens,
             "ancestor_indices": ancestor_indices,
             "sequence_indices": [],
+            "sequence_ids": [],
         }
         if packable_keys:
             info_entry["packed_fields"] = {key: [] for key in packable_keys}
@@ -368,6 +370,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             else None
         )
         info["sequence_indices"].append(sequence_indices)
+        info["sequence_ids"].append(seq_idx)
         if value_slices is not None:
             for key, slice_value in value_slices.items():
                 info["packed_fields"][key].append(slice_value)
@@ -392,6 +395,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             "input_ids": token_tensor,
             "attention_mask": mask_tensor,
             "sequence_indices": info["sequence_indices"],
+            "sequence_ids": info["sequence_ids"],
         }
 
         if packable_keys:
@@ -411,6 +415,41 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
 
     return roots, node_counts, packed_trees
 
+
+def recover_packed_tensor_list(
+    tensor_list: list[torch.Tensor], 
+    sequence_indices_list: list[list[int]], 
+    sequence_ids_list: list[int]
+) -> torch.Tensor:
+    """ TODO: Refactor this to be compatible with old forward/train_batch impl, too messy.
+    
+    Recover the original per-sequence tensor from a list of packed tree tensors.
+    Args:
+        tensor_list: List of packed tree tensors, each of shape (num_total_tokens, ...).
+        sequence_indices_list: List of per-tree sequence indices.
+        sequence_ids_list: List of original sequence IDs corresponding to each sequence in sequence_indices_list.
+    
+    Returns:
+        Tensor of shape (batch_size, max_seq_len, ...) containing the recovered per-sequence data.
+    """
+    seq_lens = [
+        [len(indices) for indices in sequence_indices] 
+        for sequence_indices in sequence_indices_list
+    ]
+    seq_lens = [length for sublist in seq_lens for length in sublist]
+    seq_ids = [_id for sublist in sequence_ids_list for _id in sublist]
+    full_tensor = torch.cat(tensor_list, dim=0)
+    assert len(seq_lens) == len(seq_ids), "Mismatch in number of sequences and sequence IDs."
+    assert full_tensor.shape[0] == sum(seq_lens), "Mismatch in total tokens and sum of sequence lengths."
+    
+    tensors = []
+    cursor = 0
+    for length in seq_lens:
+        seq_tensor = full_tensor[cursor:cursor + length]
+        tensors.append(seq_tensor)
+        cursor += length
+    recovered = pad_and_stack_tensors_along_first_dim(tensors, seq_ids)
+    return recovered
 
 def amend_packed_tree_position_ids(input_: dict[str, Any]) -> torch.Tensor:
     """Generate position ids for packed tree inputs.
