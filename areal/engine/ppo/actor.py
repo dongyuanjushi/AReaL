@@ -402,13 +402,23 @@ def grpo_loss_fn(
         cu_seqlens=input_data.get("cu_seqlens"),
     )
 
+    n_tokens = logits.shape[0] if not enable_tree_training else logprobs.shape[0]
     # Log training statistics
     stats_tracker.denominator(
-        n_tokens=torch.ones(logits.shape[0], dtype=torch.bool, device=logits.device),
+        n_tokens=torch.ones(n_tokens, dtype=torch.bool, device=logits.device),
         n_valid_tokens=loss_mask.bool(),
         clipped_tokens=stat["clip_mask"],
         dual_clipped_tokens=stat["dual_clip_mask"],
     )
+    if enable_tree_training:
+        n_tree_tokens = logprobs.shape[0]
+        stats_tracker.denominator(
+            n_tree_tokens=torch.ones(
+                n_tree_tokens, dtype=torch.bool, device=logits.device
+            )
+        )
+        tree_tokens_ratio = n_tree_tokens / n_tokens
+        stats_tracker.scalar(tree_tokens_ratio=tree_tokens_ratio)
 
     stats_tracker.stat(
         importance_weight=stat["importance_weight"],
@@ -433,7 +443,7 @@ def grpo_loss_fn(
     stats_tracker.stat(
         vocab_min_logits=vocab_min_logits,
         vocab_max_logits=vocab_max_logits,
-        denominator="n_tokens",
+        denominator="n_tokens" if not enable_tree_training else "n_tree_tokens",
     )
 
     clip_mask = stat["clip_mask"]
