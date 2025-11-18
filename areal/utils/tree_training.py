@@ -448,7 +448,7 @@ def recover_packed_tensor_list(
         seq_tensor = full_tensor[cursor:cursor + length]
         tensors.append(seq_tensor)
         cursor += length
-    recovered = pad_and_stack_tensors_along_first_dim(tensors, seq_ids)
+    recovered = pad_and_stack_tensors_along_first_dim(tensors)
     return recovered
 
 def amend_packed_tree_position_ids(input_: dict[str, Any]) -> torch.Tensor:
