@@ -1017,7 +1017,9 @@ class MegatronEngine(TrainEngine):
                 # 2. change loss_fn to unpack logprobs from a tree structure to flattened sequences.
                 # 3. scale gradients directly, which is ugly.
                 # Try option 2 first for simplicity.
+                orig_input = mb_list.mbs[forward_step_count]
                 output = model_with_tree_attention_forward(model, batch)
+                forward_step_counts[model_vp_stage] += 1
             else:
                 padding_length = mb_list.padding_lengths[forward_step_count]
                 orig_input = mb_list.mbs[forward_step_count]
@@ -1198,7 +1200,9 @@ class MegatronEngine(TrainEngine):
             model_vp_stage = getattr(model, "vp_stage", 0)
             forward_step_count = forward_step_counts[model_vp_stage]
             if self.enable_tree_training:
+                orig_input = mb_list.mbs[forward_step_count]
                 output = model_with_tree_attention_forward(model, batch)
+                forward_step_counts[model_vp_stage] += 1
             else:
                 padding_length = mb_list.padding_lengths[forward_step_count]
                 orig_input = mb_list.mbs[forward_step_count]
