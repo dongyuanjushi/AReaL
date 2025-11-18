@@ -189,10 +189,13 @@ def main(args):
     rollout = RemoteSGLangEngine(config.rollout)
     rollout.initialize(train_data_parallel_size=parallel_strategy.dp_size)
 
-    weight_update_meta = WeightUpdateMeta.from_megatron_xccl(allocation_mode)
-
     actor.initialize(
         None, ft_spec, parallel_strategy=parallel_strategy, seed=config.seed
+    )
+    
+    weight_update_meta = WeightUpdateMeta.from_megatron_xccl(
+        allocation_mode,
+        nccl_group_name=actor.weight_update_group_name,
     )
     actor.connect_engine(rollout, weight_update_meta)
 
