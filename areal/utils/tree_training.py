@@ -16,6 +16,57 @@ class TokenNode:
         self.is_end_of_sequence = False
 
 
+class CompressedTokenNode:
+    def __init__(
+        self,
+        tokens: list[int] | None = None,
+        end_flags: list[bool] | None = None,
+        *,
+        terminates_here: bool = False,
+    ):
+        self.tokens = tokens or []
+        if end_flags is not None:
+            if len(end_flags) != len(self.tokens):
+                raise ValueError("end_flags must match the number of tokens")
+            self.end_flags = end_flags
+        else:
+            self.end_flags = [False] * len(self.tokens)
+        self.terminates_here = terminates_here
+        self.children: dict[int, "CompressedTokenNode"] = {}
+        self.token_indices: list[int] = [-1] * len(self.tokens)
+
+def _compress_token_tree(root: TokenNode) -> CompressedTokenNode:
+    def _compress_from(node: TokenNode) -> CompressedTokenNode:
+        tokens: list[int] = []
+        end_flags: list[bool] = []
+        current = node
+        while True:
+            tokens.append(current.token_id)
+            end_flags.append(current.is_end_of_sequence)
+            if len(current.children) != 1:
+                break
+            # Only one child; continue along the chain without branching.
+            (_, next_child) = next(
+                iter(sorted(current.children.items(), key=lambda item: item[0]))
+            )
+            current = next_child
+
+        compressed = CompressedTokenNode(tokens, end_flags)
+        if current.children:
+            compressed.children = {
+                token: _compress_from(child)
+                for token, child in sorted(current.children.items(), key=lambda item: item[0])
+            }
+        return compressed
+
+    compressed_root = CompressedTokenNode(terminates_here=root.is_end_of_sequence)
+    if root.children:
+        compressed_root.children = {
+            token: _compress_from(child)
+            for token, child in sorted(root.children.items(), key=lambda item: item[0])
+        }
+    return compressed_root
+
 def _to_sequence_list(data: dict[str, Any]):
     assert "input_ids" in data, "Input data must contain 'input_ids'"
     assert "attention_mask" in data, "Input data must contain 'attention_mask'"
@@ -29,24 +80,16 @@ def _to_sequence_list(data: dict[str, Any]):
     return sequences
 
 
-def _compress_for_visualization(node: TokenNode) -> tuple[int, list[tuple[int, list]]]:
-    span = 1
-    cursor = node
-
-    while len(cursor.children) == 1 and not cursor.is_end_of_sequence:
-        (_, child) = next(iter(cursor.children.items()))
-        cursor = child
-        span += 1
-
+def _compress_for_visualization(node: CompressedTokenNode) -> tuple[int, list[tuple[int, list]]]:
+    span = len(node.tokens)
     children = [
         _compress_for_visualization(child)
-        for _, child in sorted(cursor.children.items(), key=lambda item: item[0])
+        for _, child in sorted(node.children.items(), key=lambda item: item[0])
     ]
-
     return span, children
 
 
-def _render_compressed_tree(root: TokenNode) -> str:
+def _render_compressed_tree(root: CompressedTokenNode) -> str:
     compressed_roots = [
         _compress_for_visualization(child)
         for _, child in sorted(root.children.items(), key=lambda item: item[0])
@@ -105,14 +148,15 @@ def simple_build_tree(data: dict[str, Any], visualize: bool = False):
     Each leaf node corresponds to a complete sequence.
 
     Args:
-        sequences (list[list[int]]): Token sequences to insert into the tree.
+        data (dict[str, Any]): Dictionary containing ``input_ids`` and ``attention_mask``
+            tensors describing the batch of sequences to insert into the tree.
         visualize (bool): When ``True`` also returns a plain-text visualization
             where each node displays the number of consecutive tokens without
             branching.
 
     Returns:
-        tuple[list[TokenNode], int] | tuple[list[TokenNode], int, str]:
-            Root nodes (first real tokens) of the constructed trees, total
+        tuple[CompressedTokenNode, int] | tuple[CompressedTokenNode, int, str]:
+            Root node (first real tokens) of the constructed tree, total
             number of concrete nodes (excluding the dummy root), and optionally
             the visualization string when ``visualize`` is ``True``.
     """
@@ -137,17 +181,20 @@ def simple_build_tree(data: dict[str, Any], visualize: bool = False):
 
         current.is_end_of_sequence = True
 
+    compressed_root = _compress_token_tree(root)
+
     if visualize:
-        visualization = _render_compressed_tree(root)
+        visualization = _render_compressed_tree(compressed_root)
         logger.info("Token Tree Visualization:\n%s", visualization)
-    return root, total_nodes
+    return compressed_root, total_nodes
 
 
 def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize: bool = False):
     """Build token trees from a list of token sequences using a greedy packing strategy.
     The number of tokens in each tree will not exceed ``max_tokens_per_tree``.
     Args:
-        sequences (list[list[int]]): Token sequences to insert into the tree.
+        data (dict[str, Any]): Dictionary containing ``input_ids`` and ``attention_mask``
+            tensors describing the batch of sequences to insert into the tree.
         max_tokens_per_tree (int): Maximum number of tokens allowed in each tree.
         visualize (bool): When ``True`` also returns a plain-text visualization
             where each node displays the number of consecutive tokens without
@@ -187,34 +234,41 @@ def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize:
     roots = [tree["root"] for tree in forests]
     node_counts = [tree["nodes"] for tree in forests]
 
-    if not visualize:
-        return roots, node_counts
+    compressed_roots = [_compress_token_tree(root) for root in roots]
 
-    for idx, tree in enumerate(forests):
-        visualization = _render_compressed_tree(tree["root"])
+    if not visualize:
+        return compressed_roots, node_counts
+
+    for idx, compressed_root in enumerate(compressed_roots):
+        visualization = _render_compressed_tree(compressed_root)
         logger.info("Token Tree %d Visualization:\n%s", idx, visualization)
 
-    return roots, node_counts
+    return compressed_roots, node_counts
 
 
-def _flatten_tree_tokens(root: TokenNode) -> tuple[list[int], list[list[int]], list[TokenNode]]:
-    """Collect tokens, ancestor indices, and node order via depth-first traversal."""
+def _flatten_tree_tokens(root: CompressedTokenNode) -> tuple[list[int], list[list[int]]]:
+    """Collect tokens and ancestor indices via iterative traversal of compressed nodes."""
 
     tokens: list[int] = []
     ancestor_indices: list[list[int]] = []
-    node_order: list[TokenNode] = []
 
-    def _dfs(node: TokenNode, path: list[int]):
-        for token, child in sorted(node.children.items(), key=lambda item: item[0]):
+    stack: list[tuple[CompressedTokenNode, list[int]]] = [(root, [])]
+
+    while stack:
+        node, path = stack.pop()
+        local_path = path
+        for pos, token in enumerate(node.tokens):
             current_index = len(tokens)
             tokens.append(token)
-            node_order.append(child)
-            current_path = path + [current_index]
+            node.token_indices[pos] = current_index
+            current_path = local_path + [current_index]
             ancestor_indices.append(current_path)
-            _dfs(child, current_path)
+            local_path = current_path
 
-    _dfs(root, [])
-    return tokens, ancestor_indices, node_order
+        for _, child in sorted(node.children.items(), key=lambda item: item[0], reverse=True):
+            stack.append((child, local_path))
+
+    return tokens, ancestor_indices
 
 
 def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
@@ -231,7 +285,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
     Otherwise, keep them unchanged in each output dictionary.
 
     Returns:
-        tuple[list[TokenNode], list[int], list[dict[str, Any]]]:
+        tuple[list[CompressedTokenNode], list[int], list[dict[str, Any]]]:
             ``roots`` of the packed token trees, token counts per tree, and tree-packed inputs with per-sequence indices.
     """
     roots, node_counts = greedy_build_tree(data, max_tokens_per_tree=max_tokens_per_tree)
@@ -251,18 +305,16 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
 
     tree_infos: list[dict[str, Any]] = []
     for idx, (root, node_count) in enumerate(zip(roots, node_counts)):
-        tokens, ancestor_indices, node_order = _flatten_tree_tokens(root)
+        tokens, ancestor_indices = _flatten_tree_tokens(root)
         if len(tokens) != node_count:
             raise RuntimeError(
                 "Flattened token count does not match node count for tree "
                 f"{idx}: {len(tokens)} != {node_count}."
             )
-        node_index_map = {node: i for i, node in enumerate(node_order)}
         info_entry: dict[str, Any] = {
             "root": root,
             "tokens": tokens,
             "ancestor_indices": ancestor_indices,
-            "node_index_map": node_index_map,
             "sequence_indices": [],
         }
         if packable_keys:
@@ -271,22 +323,43 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
 
     sequences = _to_sequence_list(data)
 
-    def _locate_tree(sequence: list[int]) -> int:
+    def _match_sequence(root: CompressedTokenNode, sequence: list[int]) -> list[int] | None:
+        if not sequence:
+            return [] if root.terminates_here else None
+
+        node = root
+        position = -1
+        indices: list[int] = []
+
+        for token in sequence:
+            if position + 1 < len(node.tokens) and node.tokens[position + 1] == token:
+                position += 1
+            else:
+                child = node.children.get(token)
+                if child is None or not child.tokens or child.tokens[0] != token:
+                    return None
+                node = child
+                position = 0
+
+            token_index = node.token_indices[position]
+            if token_index < 0:
+                raise RuntimeError("Token indices not initialized for compressed tree traversal.")
+            indices.append(token_index)
+
+        final_flag = node.end_flags[position] if node.tokens else node.terminates_here
+        if not final_flag:
+            return None
+        return indices
+
+    def _locate_tree_with_indices(sequence: list[int]) -> tuple[int, list[int]]:
         for tree_idx, info in enumerate(tree_infos):
-            current = info["root"]
-            valid = True
-            for token in sequence:
-                child = current.children.get(token)
-                if child is None:
-                    valid = False
-                    break
-                current = child
-            if valid:
-                return tree_idx
+            indices = _match_sequence(info["root"], sequence)
+            if indices is not None:
+                return tree_idx, indices
         raise ValueError("Sequence not found in any constructed tree.")
 
     for seq_idx, sequence in enumerate(sequences):
-        tree_idx = _locate_tree(sequence)
+        tree_idx, sequence_indices = _locate_tree_with_indices(sequence)
         info = tree_infos[tree_idx]
         mask_row = mask_template[seq_idx].bool()
         value_slices = (
@@ -294,16 +367,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             if packable_keys
             else None
         )
-        if not sequence:
-            info["sequence_indices"].append([])
-        else:
-            current = info["root"]
-            indices: list[int] = []
-            for token in sequence:
-                current = current.children[token]
-                node_idx = info["node_index_map"][current]
-                indices.append(node_idx)
-            info["sequence_indices"].append(indices)
+        info["sequence_indices"].append(sequence_indices)
         if value_slices is not None:
             for key, slice_value in value_slices.items():
                 info["packed_fields"][key].append(slice_value)

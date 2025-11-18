@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import pytest
 
 from areal.utils.tree_training import (
-    TokenNode,
+    CompressedTokenNode,
     simple_build_tree,
     greedy_build_tree,
     build_tree_input,
@@ -34,24 +34,32 @@ def test_simple_build_tree_structure_and_counts():
 
     root, total_nodes = simple_build_tree(data)
 
-    assert isinstance(root, TokenNode)
+    assert isinstance(root, CompressedTokenNode)
     # Unique token nodes excluding the dummy root: 1, 2 (child of 1), 3, 4, and 2 (direct child of root)
     assert total_nodes == 5
 
+    assert root.terminates_here
     assert set(root.children.keys()) == {1, 2}
+
     node1 = root.children[1]
-    assert not node1.is_end_of_sequence
-    node2 = root.children[2]
-    assert node2.is_end_of_sequence
+    assert isinstance(node1, CompressedTokenNode)
+    assert node1.tokens == [1, 2]
+    assert node1.end_flags == [False, False]
 
-    node1_child2 = node1.children[2]
-    assert not node1_child2.is_end_of_sequence
-    assert set(node1_child2.children.keys()) == {3, 4}
-    assert node1_child2.children[3].is_end_of_sequence
-    assert node1_child2.children[4].is_end_of_sequence
+    node2_direct = root.children[2]
+    assert node2_direct.tokens == [2]
+    assert node2_direct.end_flags == [True]
 
-    # Empty sequence should mark the dummy root as an end point without adding nodes
-    assert root.is_end_of_sequence
+    node1_children_keys = set(node1.children.keys())
+    assert node1_children_keys == {3, 4}
+
+    node1_child3 = node1.children[3]
+    assert node1_child3.tokens == [3]
+    assert node1_child3.end_flags == [True]
+
+    node1_child4 = node1.children[4]
+    assert node1_child4.tokens == [4]
+    assert node1_child4.end_flags == [True]
 
 
 def test_greedy_build_tree_packs_sequences_under_capacity():
@@ -67,9 +75,9 @@ def test_greedy_build_tree_packs_sequences_under_capacity():
     for count in node_counts:
         assert count <= 5
 
-    # Ensure every root is a TokenNode and contains at least one sequence
+    # Ensure every root is a CompressedTokenNode and contains at least one sequence
     for root in roots:
-        assert isinstance(root, TokenNode)
+        assert isinstance(root, CompressedTokenNode)
         assert root.children
 
 
