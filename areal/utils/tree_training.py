@@ -826,5 +826,6 @@ def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]
         attention_mask=attention_mask,
         position_ids=position_ids,
     )
+    output = output.squeeze(0)  # Remove batch dimension
     return output
 
