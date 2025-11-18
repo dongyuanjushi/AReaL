@@ -146,11 +146,11 @@ class MegatronEngine(TrainEngine):
             f"update_weight_group_{mpu.get_pipeline_model_parallel_rank()}"
         )
         self.engine_lock = DistributedLock("train_engine_lock")
+        if self.enable_tree_training:
+            patch_bridge_for_tree_training()
 
         self.tokenizer = load_hf_tokenizer(self.config.path)
         self.bridge = mbridge.AutoBridge.from_pretrained(self.config.path)
-        if self.enable_tree_training:
-            patch_bridge_for_tree_training(self.bridge)
 
         self.bridge.dtype = self.dtype
         # Set gradient checkpointing options

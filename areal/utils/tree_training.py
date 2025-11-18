@@ -699,10 +699,10 @@ def _get_transformer_layer_spec_with_tree_attention(self, vp_stage: int | None =
     )
     return transformer_layer_spec
 
-def patch_bridge_for_tree_training(bridge_instance: LLMBridge):
+def patch_bridge_for_tree_training():
     """ Patch LLMBridge to support tree training with arbitrary attention mask.
     """
-    bridge_instance._get_transformer_layer_spec = _get_transformer_layer_spec_with_tree_attention
+    LLMBridge._get_transformer_layer_spec = _get_transformer_layer_spec_with_tree_attention
 
 
 ############################## Model Forward ##############################
