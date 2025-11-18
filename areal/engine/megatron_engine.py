@@ -873,8 +873,9 @@ class MegatronEngine(TrainEngine):
         # 2. Correction on position ids for token trees
 
         # entries in input_: attention_mask, input_ids of shape [b, s]
-        tree_roots, num_tree_tokens, tree_input = build_tree_input(input_, self.config.mb_spec.max_tokens_per_mb)
-        amend_packed_tree_position_ids(tree_input)
+        tree_roots, num_tree_tokens, tree_input_mbs = build_tree_input(input_, self.config.mb_spec.max_tokens_per_mb)
+        for tree_input in tree_input_mbs:
+            amend_packed_tree_position_ids(tree_input)
 
         pp_size = self.parallel_strategy.pipeline_parallel_size
         cp_size = self.parallel_strategy.context_parallel_size
@@ -885,13 +886,13 @@ class MegatronEngine(TrainEngine):
         
         # currently, we take a token tree as a micro-batch for concept proof
         # TODO: batch multiple token trees into a micro-batch
-        if len(tree_input) < 2 * pp_size:
+        if len(tree_input_mbs) < 2 * pp_size:
             self.logger.warning("Number of token trees less than 2 * pp_size, may cause large pipeline bubbles.")
 
         return MicroBatchList(
             data=input_,
             mb_spec=self.config.mb_spec,
-            mbs=tree_input,
+            mbs=tree_input_mbs,
             forward_indices=list(range(sum(num_tree_tokens))),
             backward_indices=list(range(sum(num_tree_tokens))),
             group_lens=num_tree_tokens,
