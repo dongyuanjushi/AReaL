@@ -98,7 +98,7 @@ class PPOActor:
         self.engine.eval()
         return self.engine.forward(
             input_=data,
-            post_hook=calc_logprobs if not self.enable_tree_training else packed_tree_gather_logprobs,
+            post_hook=calc_logprobs,
             aggregate_fn=lambda xs: torch.cat(xs, dim=-1),
         )
 
