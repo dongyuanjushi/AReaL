@@ -191,7 +191,9 @@ def main(args):
 
     weight_update_meta = WeightUpdateMeta.from_megatron_xccl(allocation_mode)
 
-    actor.initialize(None, ft_spec)
+    actor.initialize(
+        None, ft_spec, parallel_strategy=parallel_strategy, seed=config.seed
+    )
     actor.connect_engine(rollout, weight_update_meta)
 
     # Create rollout workflow
