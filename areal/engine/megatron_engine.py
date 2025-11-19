@@ -47,6 +47,7 @@ from areal.utils.data import (
     unpack_sequence,
     unpad_logits,
 )
+from areal.utils.datapack import flat2d
 from areal.utils.distributed import init_custom_process_group
 from areal.utils.hf_utils import load_hf_tokenizer
 from areal.utils.lock import DistributedLock
@@ -71,6 +72,7 @@ from areal.utils.tree_training import (
     model_with_tree_attention_forward,
     amend_packed_tree_position_ids,
     recover_packed_tensor_list,
+    get_seq_lens,
 )
 class _MegatronModelList(list):
     """List wrapper that exposes module-like helpers for Megatron model chunks."""
@@ -1254,14 +1256,18 @@ class MegatronEngine(TrainEngine):
         if mpu.is_pipeline_last_stage():
             # TODO: recover packed trees for adv computation
             if self.enable_tree_training:
+                # TODO: Refactor this
                 tensor_list = [o["output"] for o in output_list]
-                sequence_indices_list = [mb["sequence_indices"] for mb in mb_list.padded_mbs]
-                sequence_ids_list = [mb["sequence_ids"] for mb in mb_list.padded_mbs]
-                result = recover_packed_tensor_list(
-                    tensor_list, 
-                    sequence_indices_list, 
-                    sequence_ids_list
-                )
+                seq_ids_list = [mb["sequence_ids"] for mb in mb_list.padded_mbs]
+                seq_id_to_tree_indices_list = [mb["seq_ids_to_tree_indices"] for mb in mb_list.padded_mbs]
+                unpacked = []
+                for t, seq_ids, seq_id_to_tree_indices in zip(tensor_list, seq_ids_list, seq_id_to_tree_indices_list):
+                    lens = get_seq_lens(seq_ids, seq_id_to_tree_indices)
+                    unpacked.extend(unpack_sequence(t, lens=lens, dim=0))
+                forward_indices = flat2d(seq_ids_list)
+                backward_indices = [forward_indices.index(i) for i in range(len(forward_indices))]
+                reordered = reorder_list(unpacked, backward_indices)
+                result = pad_and_stack_tensors_along_first_dim(reordered)
             else:
                 res = aggregate_fn([o["output"] for o in output_list])
                 output_seqlens = [output_seqlens[i] for i in mb_list.forward_indices]

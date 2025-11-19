@@ -83,9 +83,10 @@ class PPOActor:
         def calc_logprobs(logits, input_data):
             if self.enable_tree_training:
                 input_ids = input_data["input_ids"]
-                sequence_indices = input_data["sequence_indices"]
+                sequence_ids = input_data["sequence_ids"]
+                seq_id_to_tree_indices = input_data["seq_id_to_tree_indices"]
                 logprobs = packed_tree_gather_logprobs(
-                    logits, input_ids, sequence_indices, temperature or 1.0
+                    logits, input_ids, sequence_ids, seq_id_to_tree_indices, temperature or 1.0
                 )
             else:
                 labels = input_data.get(
@@ -365,7 +366,8 @@ def grpo_loss_fn(
         logprobs, entropy = packed_tree_gather_logprobs(
             logits,
             input_data["input_ids"],
-            input_data["sequence_indices"],
+            input_data["sequence_ids"],
+            input_data["seq_id_to_tree_indices"],
             temperature,
             calculate_entropy=True,
         )

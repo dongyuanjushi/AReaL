@@ -1,4 +1,5 @@
 from typing import Any
+from collections import defaultdict
 
 import torch
 
@@ -13,20 +14,33 @@ logger = logging.getLogger("Tree Training")
 ############################## Token Tree Construction ##############################
 
 class TokenNode:
-    def __init__(self, token_id: int):
+    def __init__(self, tree_id: int, token_id: int, node_id: int):
+        self.tree_id = tree_id
+        self.node_id = node_id
         self.token_id = token_id
         self.children = {}
         self.is_end_of_sequence = False
+        self.sequence_ids = []
+        self.tree_nodes = [] # only available in root node
+    
+    def add_sequence(self, sequence_id: int):
+        self.sequence_ids.append(sequence_id)
 
 
 class CompressedTokenNode:
     def __init__(
         self,
+        tree_id: int,
+        start_node_id: int,
+        end_node_id: int,
         tokens: list[int] | None = None,
         end_flags: list[bool] | None = None,
         *,
         terminates_here: bool = False,
     ):
+        self.tree_id = tree_id
+        self.start_node_id = start_node_id
+        self.end_node_id = end_node_id
         self.tokens = tokens or []
         if end_flags is not None:
             if len(end_flags) != len(self.tokens):
@@ -36,11 +50,19 @@ class CompressedTokenNode:
             self.end_flags = [False] * len(self.tokens)
         self.terminates_here = terminates_here
         self.children: dict[int, "CompressedTokenNode"] = {}
-        self.token_indices: list[int] = [-1] * len(self.tokens)
+        self.ancestors: list["CompressedTokenNode"] = []
+        self.sequence_ids = []
+        self.tree_nodes = []
+    
+    def set_sequence_ids(self, sequence_ids: list[int]):
+        self.sequence_ids = sequence_ids.copy()
+
 
 @trace_perf("tree_training._compress_token_tree")
 def _compress_token_tree(root: TokenNode) -> CompressedTokenNode:
-    def _compress_from(node: TokenNode) -> CompressedTokenNode:
+    compressed_root = CompressedTokenNode(root.tree_id, -1, -1, terminates_here=root.is_end_of_sequence)
+    
+    def _compress_from(node: TokenNode, ancestors: list[CompressedTokenNode]) -> CompressedTokenNode:
         tokens: list[int] = []
         end_flags: list[bool] = []
         current = node
@@ -53,20 +75,30 @@ def _compress_token_tree(root: TokenNode) -> CompressedTokenNode:
             (_, next_child) = next(
                 iter(sorted(current.children.items(), key=lambda item: item[0]))
             )
+            if current.sequence_ids != next_child.sequence_ids:
+                raise ValueError(
+                    "Sequence IDs do not match along compression path."
+                )
+            if next_child.node_id != current.node_id + 1:
+                raise ValueError(
+                    "Node IDs are not consecutive along compression path."
+                )
             current = next_child
 
-        compressed = CompressedTokenNode(tokens, end_flags)
+        compressed = CompressedTokenNode(root.tree_id, node.node_id, current.node_id, tokens, end_flags)
+        compressed.ancestors = ancestors.copy()
+        compressed.set_sequence_ids(current.sequence_ids)
+        compressed_root.tree_nodes.append(compressed)
         if current.children:
             compressed.children = {
-                token: _compress_from(child)
+                token: _compress_from(child, ancestors + [compressed])
                 for token, child in sorted(current.children.items(), key=lambda item: item[0])
             }
         return compressed
-
-    compressed_root = CompressedTokenNode(terminates_here=root.is_end_of_sequence)
+    
     if root.children:
         compressed_root.children = {
-            token: _compress_from(child)
+            token: _compress_from(child, [root])
             for token, child in sorted(root.children.items(), key=lambda item: item[0])
         }
     return compressed_root
@@ -133,65 +165,46 @@ def _count_additional_nodes(root: TokenNode, sequence: list[int]) -> int:
     return 0
 
 
-def _insert_sequence(root: TokenNode, sequence: list[int]) -> None:
+def _insert_sequence(root: TokenNode, sequence: list[int], tree_id: int, sequence_id: int) -> None:
     """Insert ``sequence`` into ``root`` (mutates tree in-place)."""
-
     current = root
     for token in sequence:
         if token not in current.children:
-            current.children[token] = TokenNode(token)
+            num_tokens = len(root.tree_nodes)
+            current.children[token] = TokenNode(tree_id, token, num_tokens)
+            root.tree_nodes.append(current.children[token])        
+        current.children[token].add_sequence(sequence_id)
         current = current.children[token]
-
     current.is_end_of_sequence = True
 
+@trace_perf("tree_training.parse_tree_infos")
+def parse_tree_infos(roots: list[CompressedTokenNode]) -> list[dict[str, Any]]:
+    """Parse tree infos from compressed token trees."""
+    tree_infos: list[dict[str, Any]] = []
+    for root in roots:
+        sequence_indices = set()
+        seq_id_to_tree_indices = {}
+        tree_endpoints_to_seq_info = {}
+        positions = defaultdict(int)
 
-def simple_build_tree(data: dict[str, Any], visualize: bool = False):
-    """Build token trees from a list of token sequences.
+        for node in root.tree_nodes:
+            for seq_id in node.sequence_ids:
+                sequence_indices.add(seq_id)
+                if seq_id not in seq_id_to_tree_indices:
+                    seq_id_to_tree_indices[seq_id] = []
+                seq_id_to_tree_indices[seq_id].append((node.start_node_id, node.end_node_id))
+                tree_endpoints_to_seq_info[(node.start_node_id, node.end_node_id)] = (seq_id, positions[seq_id])
+                positions[seq_id] += node.end_node_id - node.start_node_id
 
-    Each node in the tree represents a token. Each edge represents the transition
-    from one token to the next. The root node is a dummy node with token_id=-1.
-    Each leaf node corresponds to a complete sequence.
+        tree_info = {
+            "tree_id": root.tree_id,
+            "sequence_ids": sorted(list(sequence_indices)),
+            "seq_id_to_tree_indices": seq_id_to_tree_indices,
+            "tree_endpoints_to_seq_info": tree_endpoints_to_seq_info,
+        }
+        tree_infos.append(tree_info)
+    return tree_infos
 
-    Args:
-        data (dict[str, Any]): Dictionary containing ``input_ids`` and ``attention_mask``
-            tensors describing the batch of sequences to insert into the tree.
-        visualize (bool): When ``True`` also returns a plain-text visualization
-            where each node displays the number of consecutive tokens without
-            branching.
-
-    Returns:
-        tuple[CompressedTokenNode, int] | tuple[CompressedTokenNode, int, str]:
-            Root node (first real tokens) of the constructed tree, total
-            number of concrete nodes (excluding the dummy root), and optionally
-            the visualization string when ``visualize`` is ``True``.
-    """
-
-    normalized_sequences = _to_sequence_list(data)
-
-    root = TokenNode(-1)
-    total_nodes = 0  # Do not count the dummy root node.
-
-    for seq in normalized_sequences:
-        current = root
-
-        if not seq:
-            current.is_end_of_sequence = True
-            continue
-
-        for token in seq:
-            if token not in current.children:
-                current.children[token] = TokenNode(token)
-                total_nodes += 1
-            current = current.children[token]
-
-        current.is_end_of_sequence = True
-
-    compressed_root = _compress_token_tree(root)
-
-    if visualize:
-        visualization = _render_compressed_tree(compressed_root)
-        logger.info("Token Tree Visualization:\n%s", visualization)
-    return compressed_root, total_nodes
 
 @trace_perf("tree_training.greedy_build_tree")
 def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize: bool = False):
@@ -212,13 +225,13 @@ def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize:
 
     forests: list[dict[str, Any]] = []
 
-    for seq in normalized_sequences:
+    for seq_id, seq in enumerate(normalized_sequences):
         inserted = False
 
-        for tree in forests:
+        for tree_id, tree in enumerate(forests):
             additional = _count_additional_nodes(tree["root"], seq)
             if tree["nodes"] + additional <= max_tokens_per_tree:
-                _insert_sequence(tree["root"], seq)
+                _insert_sequence(tree["root"], seq, tree_id, seq_id)
                 tree["nodes"] += additional
                 inserted = True
                 break
@@ -232,68 +245,37 @@ def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize:
                 "Sequence length exceeds max_tokens_per_tree; adjust the limit or split sequences."
             )
 
-        new_root = TokenNode(-1)
-        _insert_sequence(new_root, seq)
+        new_tree_id = len(forests)
+        new_root = TokenNode(new_tree_id, -1, -1)
+        _insert_sequence(new_root, seq, new_tree_id, seq_id)
         forests.append({"root": new_root, "nodes": additional})
 
     roots = [tree["root"] for tree in forests]
     node_counts = [tree["nodes"] for tree in forests]
 
     compressed_roots = [_compress_token_tree(root) for root in roots]
+    tree_infos = parse_tree_infos(compressed_roots)
 
-    if not visualize:
-        return compressed_roots, node_counts
+    if visualize:
+        for idx, compressed_root in enumerate(compressed_roots):
+            visualization = _render_compressed_tree(compressed_root)
+            logger.info("Token Tree %d Visualization:\n%s", idx, visualization)
 
-    for idx, compressed_root in enumerate(compressed_roots):
-        visualization = _render_compressed_tree(compressed_root)
-        logger.info("Token Tree %d Visualization:\n%s", idx, visualization)
-
-    return compressed_roots, node_counts
-
-@trace_perf("tree_training._flatten_tree_tokens")
-def _flatten_tree_tokens(root: CompressedTokenNode) -> tuple[list[int], list[list[int]]]:
-    """Collect tokens and ancestor indices via iterative traversal of compressed nodes."""
-
-    tokens: list[int] = []
-    ancestor_indices: list[list[int]] = []
-
-    stack: list[tuple[CompressedTokenNode, list[int]]] = [(root, [])]
-
-    while stack:
-        node, path = stack.pop()
-        local_path = path
-        for pos, token in enumerate(node.tokens):
-            current_index = len(tokens)
-            tokens.append(token)
-            node.token_indices[pos] = current_index
-            current_path = local_path + [current_index]
-            ancestor_indices.append(current_path)
-            local_path = current_path
-
-        for _, child in sorted(node.children.items(), key=lambda item: item[0], reverse=True):
-            stack.append((child, local_path))
-
-    return tokens, ancestor_indices
+    return compressed_roots, node_counts, tree_infos
 
 @trace_perf("tree_training.build_tree_input")
 def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
     """ First construct token trees from input data, then convert input data into tree-packed format.
-    The return value should be a list of dictionaries, each contains input_ids, attention_mask, and sequence_indices for a packed tree structure.
+    The return value should be a list of dictionaries, each contains input_ids, attention_mask, and tree infos for a packed tree structure.
     The input id should be a flattened list of token ids in the tree structure with pre-ordered traversal.
     The attention mask represents the causal relationship between tokens in the token tree, in which entries are set to true when 
     two tokens are in the same sequence and follows causal relationship (lower triangular causal mask).
-    The sequence_indices entry contains, for every original sequence packed into the tree, the indices of the tokens belonging to that
-    sequence in the tree order.
-
-    If there are other fields in the input data, check if their shape is identical to the original `input_ids`.
-    If yes, they will be packed into the output dictionary in flatten full-sequence manner following `sequence_indices`.
-    Otherwise, keep them unchanged in each output dictionary.
 
     Returns:
         tuple[list[CompressedTokenNode], list[int], list[dict[str, Any]]]:
             ``roots`` of the packed token trees, token counts per tree, and tree-packed inputs with per-sequence indices.
     """
-    roots, node_counts = greedy_build_tree(data, max_tokens_per_tree=max_tokens_per_tree)
+    roots, node_counts, tree_infos = greedy_build_tree(data, max_tokens_per_tree=max_tokens_per_tree)
     packed_trees: list[dict[str, Any]] = []
 
     input_template: torch.Tensor = data["input_ids"]
@@ -307,158 +289,50 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         and value.shape == input_template.shape
     ]
     packable_key_set = set(packable_keys)
-
-    
-    with trace_scope("build_tree_input.prepare_ancestor_indices"):
-        tree_infos: list[dict[str, Any]] = []
-        for idx, (root, node_count) in enumerate(zip(roots, node_counts)):
-            tokens, ancestor_indices = _flatten_tree_tokens(root)
-            if len(tokens) != node_count:
-                raise RuntimeError(
-                    "Flattened token count does not match node count for tree "
-                    f"{idx}: {len(tokens)} != {node_count}."
-                )
-            info_entry: dict[str, Any] = {
-                "root": root,
-                "tokens": tokens,
-                "ancestor_indices": ancestor_indices,
-                "sequence_indices": [],
-                "sequence_ids": [],
-            }
-            if packable_keys:
-                info_entry["packed_fields"] = {key: [] for key in packable_keys}
-            tree_infos.append(info_entry)
-
     sequences = _to_sequence_list(data)
+    seq_lens = data["attention_mask"].sum(dim=1, dtype=torch.int32)
 
-    def _match_sequence(root: CompressedTokenNode, sequence: list[int]) -> list[int] | None:
-        if not sequence:
-            return [] if root.terminates_here else None
+    for root, num_tree_tokens, tree_info in zip(roots, tree_infos):
+        sequence_ids = tree_info["sequence_ids"]
+        seq_id_to_tree_indices = tree_info["seq_id_to_tree_indices"]
+        tree_endpoints_to_seq_info = tree_info["tree_endpoints_to_seq_info"]
 
-        node = root
-        position = -1
-        indices: list[int] = []
-
-        for token in sequence:
-            if position + 1 < len(node.tokens) and node.tokens[position + 1] == token:
-                position += 1
-            else:
-                child = node.children.get(token)
-                if child is None or not child.tokens or child.tokens[0] != token:
-                    return None
-                node = child
-                position = 0
-
-            token_index = node.token_indices[position]
-            if token_index < 0:
-                raise RuntimeError("Token indices not initialized for compressed tree traversal.")
-            indices.append(token_index)
-
-        final_flag = node.end_flags[position] if node.tokens else node.terminates_here
-        if not final_flag:
-            return None
-        return indices
-
-    def _locate_tree_with_indices(sequence: list[int]) -> tuple[int, list[int]]:
-        for tree_idx, info in enumerate(tree_infos):
-            indices = _match_sequence(info["root"], sequence)
-            if indices is not None:
-                return tree_idx, indices
-        raise ValueError("Sequence not found in any constructed tree.")
-
-    
-    with trace_scope("build_tree_input.prepare_slices"):
-        for seq_idx, sequence in enumerate(sequences):
-            tree_idx, sequence_indices = _locate_tree_with_indices(sequence)
-            info = tree_infos[tree_idx]
-            mask_row = mask_template[seq_idx].bool()
-            value_slices = (
-                {key: data[key][seq_idx][mask_row] for key in packable_keys}
-                if packable_keys
-                else None
-            )
-            info["sequence_indices"].append(sequence_indices)
-            info["sequence_ids"].append(seq_idx)
-            if value_slices is not None:
-                for key, slice_value in value_slices.items():
-                    info["packed_fields"][key].append(slice_value)
-
-    remaining_keys = set(data.keys()) - {"input_ids", "attention_mask"} - packable_key_set
-
-    with trace_scope("build_tree_input.pack_slices"):
-        for info in tree_infos:
-            tokens = info["tokens"]
-            ancestor_indices = info["ancestor_indices"]
-            token_tensor = torch.tensor(
-                tokens,
-                dtype=input_template.dtype,
-                device=input_template.device,
-            )
-
-            mask_tensor = mask_template.new_zeros((len(tokens), len(tokens)))
-            for row, cols in enumerate(ancestor_indices):
-                if cols:
-                    mask_tensor[row, cols] = 1
-
-            tree_entry: dict[str, Any] = {
-                "input_ids": token_tensor,
-                "attention_mask": mask_tensor,
-                "sequence_indices": info["sequence_indices"],
-                "sequence_ids": info["sequence_ids"],
-            }
-
-            if packable_keys:
-                # Flatten per-token fields so they align with the order implied by sequence_indices.
-                for key in packable_keys:
-                    sequences_values = info["packed_fields"][key]
-                    value_template = data[key]
-                    if sequences_values:
-                        tree_entry[key] = torch.cat(sequences_values, dim=0)
-                    else:
-                        tree_entry[key] = value_template.new_empty((0,))
-
-            for key in remaining_keys:
-                tree_entry[key] = data[key]
-
-            packed_trees.append(tree_entry)
-
+        input_ids: list[int] = torch.empty((num_tree_tokens,), dtype=input_template.dtype, device=input_template.device)
+        for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
+            input_ids[tree_start:tree_end] = sequences[seq_id][seq_start:seq_start + (tree_end - tree_start)]
+         
+        mask_tensor = mask_template.new_zeros((num_tree_tokens, num_tree_tokens))
+        for node in root.tree_nodes:
+            for i in range(node.start_node_id, node.end_node_id):
+                for j in range(0, i + 1):
+                    for ancestor in node.ancestors:
+                        if ancestor.start_node_id <= j < ancestor.end_node_id:
+                            mask_tensor[i][j] = True
+                    if node.start_node_id <= j < node.end_node_id:
+                        mask_tensor[i][j] = True
+        
+        lens = [seq_lens[seq_id].item() for seq_id in sequence_ids]
+        cu_seqlens = torch.cumsum(torch.tensor([0] + lens, dtype=torch.int32), dim=0)
+        packed_tree = {
+            "input_ids": input_ids,
+            "attention_mask": mask_tensor,
+            "sequence_ids": sequence_ids,
+            "seq_id_to_tree_indices": seq_id_to_tree_indices,
+            "tree_endpoints_to_seq_info": tree_endpoints_to_seq_info,
+            "cu_seqlens": cu_seqlens,
+        }
+        
+        for packable_key in packable_key_set:
+            packable_value = data[packable_key][sequence_ids]
+            packed_value = torch.empty((num_tree_tokens, *packable_value.shape[1:]), dtype=packable_value.dtype, device=packable_value.device)
+            cursor = 0
+            for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
+                length = tree_end - tree_start
+                packed_value[tree_start:tree_end] = packable_value[cursor:cursor + length]
+                cursor += length
+            packed_tree[packable_key] = packed_value
+        
     return roots, node_counts, packed_trees
-
-@trace_perf("tree_training.recover_packed_tensor_list")
-def recover_packed_tensor_list(
-    tensor_list: list[torch.Tensor], 
-    sequence_indices_list: list[list[int]], 
-    sequence_ids_list: list[int]
-) -> torch.Tensor:
-    """ TODO: Refactor this to be compatible with old forward/train_batch impl, too messy.
-    
-    Recover the original per-sequence tensor from a list of packed tree tensors.
-    Args:
-        tensor_list: List of packed tree tensors, each of shape (num_total_tokens, ...).
-        sequence_indices_list: List of per-tree sequence indices.
-        sequence_ids_list: List of original sequence IDs corresponding to each sequence in sequence_indices_list.
-    
-    Returns:
-        Tensor of shape (batch_size, max_seq_len, ...) containing the recovered per-sequence data.
-    """
-    seq_lens = [
-        [len(indices) for indices in sequence_indices] 
-        for sequence_indices in sequence_indices_list
-    ]
-    seq_lens = [length for sublist in seq_lens for length in sublist]
-    seq_ids = [_id for sublist in sequence_ids_list for _id in sublist]
-    full_tensor = torch.cat(tensor_list, dim=0)
-    assert len(seq_lens) == len(seq_ids), "Mismatch in number of sequences and sequence IDs."
-    assert full_tensor.shape[0] == sum(seq_lens), "Mismatch in total tokens and sum of sequence lengths."
-    
-    tensors = []
-    cursor = 0
-    for length in seq_lens:
-        seq_tensor = full_tensor[cursor:cursor + length]
-        tensors.append(seq_tensor)
-        cursor += length
-    recovered = pad_and_stack_tensors_along_first_dim(tensors)
-    return recovered
 
 def amend_packed_tree_position_ids(input_: dict[str, Any]) -> torch.Tensor:
     """Generate position ids for packed tree inputs.
@@ -489,69 +363,38 @@ def amend_packed_tree_position_ids(input_: dict[str, Any]) -> torch.Tensor:
     input_["position_ids"] = position_ids
     return input_
 
+def get_seq_lens(
+    sequence_ids: list[int],
+    seq_id_to_tree_indices: dict[int, list[int]],
+) -> list[int]:
+    """Get sequence lengths from tree indices mapping.
 
-@trace_perf("tree_training.unpack_tree_output_logits_into_sequences")
-def unpack_tree_output_logits_into_sequences(
-    logits: torch.Tensor,
-    input_data: dict[str, Any],
-) -> torch.Tensor:
-    """Unpack tree-packed logits using ``sequence_indices`` into flattened sequence order."""
+    Args:
+        sequence_ids (list[int]): List of sequence IDs.
+        seq_id_to_tree_indices (dict[int, list[int]]): Mapping from sequence ID to list of (start, end) indices in the tree.
 
-    if "sequence_indices" not in input_data:
-        raise ValueError("input_data must contain 'sequence_indices' produced by build_tree_input().")
-
-    sequence_indices = input_data["sequence_indices"]
-    if not isinstance(sequence_indices, list):
-        raise TypeError("input_data['sequence_indices'] must be a list of index lists.")
-
-    num_tree_tokens = logits.shape[0]
-    trailing_shape = logits.shape[1:]
-
-    total_positions = sum(len(indices) for indices in sequence_indices)
-    if total_positions == 0:
-        return logits.new_empty((0, *trailing_shape))
-
-    flattened = logits.new_empty((total_positions, *trailing_shape))
-    cursor = 0
-    for indices in sequence_indices:
-        if not isinstance(indices, list):
-            raise TypeError("Entries in 'sequence_indices' must be lists of token indices.")
-        for token_idx in indices:
-            if token_idx < 0 or token_idx >= num_tree_tokens:
-                raise IndexError(
-                    f"Token index {token_idx} in sequence_indices is out of bounds for logits of size {num_tree_tokens}."
-                )
-            flattened[cursor] = logits[token_idx]
-            cursor += 1
-
-    if cursor != total_positions:
-        raise RuntimeError(
-            f"Unexpected number of filled positions: expected {total_positions}, got {cursor}."
-        )
-
-    return flattened
+    Returns:
+        list[int]: List of sequence lengths corresponding to ``sequence_ids``.
+    """
+    sequence_lens = []
+    for seq_id in sequence_ids:
+        if seq_id not in seq_id_to_tree_indices:
+            raise ValueError(f"Sequence ID {seq_id} not found in seq_id_to_tree_indices.")
+        indices = seq_id_to_tree_indices[seq_id]
+        length = sum(end - start for start, end in indices)
+        sequence_lens.append(length)
+    return sequence_lens
 
 @trace_perf("tree_training.packed_tree_gather_logprobs")
 def packed_tree_gather_logprobs(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
-    sequence_indices: list[list[int]],
+    sequence_ids: list[int],
+    seq_id_to_tree_indices: dict[int, list[int]],
     temperature: float = 1.0,
     calculate_entropy: bool = False,
 ) -> torch.Tensor:
     """Gather log probabilities for sequences represented by tree-packed logits.
-
-    Args:
-        logits: Tensor of shape ``(num_tree_tokens, vocab_size)`` from the packed tree forward.
-        input_ids: Tensor of shape ``(num_tree_tokens,)`` representing tree-packed tokens.
-        sequence_indices: For each original sequence, the indices of tokens in the tree order.
-        temperature: Optional temperature scaling for logprob computation (default 1.0).
-
-    Returns:
-        If ``calculate_entropy`` is ``False``, returns a tensor of shape ``(num_total_tokens,)`` 
-        containing log probabilities in flattened sequence order aligning with ``sequence_indices``.
-        If ``calculate_entropy`` is ``True``, returns two tensors of shape ``(num_total_tokens,)``,
-        the first containing log probabilities and the second containing entropies.
     """
 
     if input_ids.ndim != 1:
@@ -562,32 +405,35 @@ def packed_tree_gather_logprobs(
     if temperature <= 0:
         raise ValueError("temperature must be positive.")
 
-    total_tokens = sum(len(indices) for indices in sequence_indices)
-    if total_tokens == 0:
-        return logits.new_empty(0)
-
+    seq_lens = get_seq_lens(sequence_ids, seq_id_to_tree_indices)
+    total_tokens = sum(seq_lens)
     flattened_logprobs = logits.new_empty(total_tokens)
     flattened_entropies = logits.new_empty(total_tokens) if calculate_entropy else None
     cursor = 0
 
-    for indices in sequence_indices:
-        if not isinstance(indices, list):
-            raise TypeError("sequence_indices must contain lists of token indices.")
-        if not indices:
-            continue
+    for seq_len, seq_id in zip(seq_lens, sequence_ids):
+        if seq_id not in seq_id_to_tree_indices:
+            raise ValueError(f"Sequence ID {seq_id} not found in seq_id_to_tree_indices.")
+        tree_indices_list = seq_id_to_tree_indices[seq_id]
+        
+        tree_token_segments = []
+        tree_logits_segments = []
+        for start, end in tree_indices_list:
+            tree_token_segments.append(input_ids[start:end])
+            tree_logits_segments.append(logits[start:end])
+        tree_tokens = torch.cat(tree_token_segments, dim=0)
+        tree_logits = torch.cat(tree_logits_segments, dim=0)
 
-        tree_tokens = input_ids[indices]
-        tree_logits = logits[indices]
         if calculate_entropy:
             seq_logprobs, seq_entropies = gather_logprobs_entropy(
                 tree_logits, tree_tokens, temperature
             )
-            flattened_logprobs[cursor : cursor + len(indices)] = seq_logprobs
-            flattened_entropies[cursor : cursor + len(indices)] = seq_entropies
+            flattened_logprobs[cursor : cursor + seq_len] = seq_logprobs
+            flattened_entropies[cursor : cursor + seq_len] = seq_entropies
         else:
             seq_logprobs = gather_logprobs(tree_logits, tree_tokens, temperature)
-            flattened_logprobs[cursor : cursor + len(indices)] = seq_logprobs
-        cursor += len(indices)
+            flattened_logprobs[cursor : cursor + seq_len] = seq_logprobs
+        cursor += seq_len
 
     if cursor != total_tokens:
         raise RuntimeError(

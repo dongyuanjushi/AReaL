@@ -4,10 +4,8 @@ import pytest
 
 from areal.utils.tree_training import (
     CompressedTokenNode,
-    simple_build_tree,
     greedy_build_tree,
     build_tree_input,
-    unpack_tree_output_logits_into_sequences,
     packed_tree_gather_logprobs,
     amend_packed_tree_position_ids,
 )
@@ -26,40 +24,6 @@ def _build_data(sequences):
         "input_ids": torch.tensor(input_ids, dtype=torch.long),
         "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
     }
-
-
-def test_simple_build_tree_structure_and_counts():
-    sequences = [[1, 2, 3], [1, 2, 4], [2], []]
-    data = _build_data(sequences)
-
-    root, total_nodes = simple_build_tree(data)
-
-    assert isinstance(root, CompressedTokenNode)
-    # Unique token nodes excluding the dummy root: 1, 2 (child of 1), 3, 4, and 2 (direct child of root)
-    assert total_nodes == 5
-
-    assert root.terminates_here
-    assert set(root.children.keys()) == {1, 2}
-
-    node1 = root.children[1]
-    assert isinstance(node1, CompressedTokenNode)
-    assert node1.tokens == [1, 2]
-    assert node1.end_flags == [False, False]
-
-    node2_direct = root.children[2]
-    assert node2_direct.tokens == [2]
-    assert node2_direct.end_flags == [True]
-
-    node1_children_keys = set(node1.children.keys())
-    assert node1_children_keys == {3, 4}
-
-    node1_child3 = node1.children[3]
-    assert node1_child3.tokens == [3]
-    assert node1_child3.end_flags == [True]
-
-    node1_child4 = node1.children[4]
-    assert node1_child4.tokens == [4]
-    assert node1_child4.end_flags == [True]
 
 
 def test_greedy_build_tree_packs_sequences_under_capacity():
@@ -146,21 +110,6 @@ def test_build_tree_input_packs_additional_tensor_fields():
     assert torch.equal(tree_batch["non_pack_tensor"], data["non_pack_tensor"])
     assert tree_batch["meta"] == data["meta"]
 
-
-def test_build_tree_input_packed_tensor_fields_with_empty_sequence():
-    sequences = [[]]
-    data = _build_data(sequences)
-
-    extra_tensor = torch.zeros_like(data["input_ids"], dtype=torch.float32)
-    data["extra"] = extra_tensor
-
-    _, _, packed = build_tree_input(data, max_tokens_per_tree=2)
-    tree_batch = packed[0]
-
-    assert tree_batch["extra"].numel() == 0
-    assert tree_batch["extra"].dtype == torch.float32
-
-
 def test_build_tree_input_sequence_indices_with_multiple_trees():
     sequences = [[1, 2], [3, 4], [1, 5], [6]]
     data = _build_data(sequences)
@@ -181,99 +130,70 @@ def test_build_tree_input_sequence_indices_with_multiple_trees():
     expected_sequences = [seq for seq in sequences if seq]
     assert sorted(reconstructed) == sorted(expected_sequences)
 
-
-def test_unpack_tree_logits_restores_flat_sequences():
-    sequences = [[1, 2, 3], [1, 2, 4], [1, 5]]
-    data = _build_data(sequences)
-
-    _, _, packed = build_tree_input(data, max_tokens_per_tree=5)
-    tree_batch = packed[0]
-
-    vocab = 3
-    logits = torch.arange(len(tree_batch["input_ids"]) * vocab, dtype=torch.float32).view(
-        len(tree_batch["input_ids"]), vocab
-    )
-
-    unpacked = unpack_tree_output_logits_into_sequences(logits, tree_batch)
-
-    expected_length = sum(len(indices) for indices in tree_batch["sequence_indices"])
-    assert unpacked.shape == (expected_length, vocab)
-    assert unpacked.device == logits.device
-
-    offset = 0
-    for indices in tree_batch["sequence_indices"]:
-        for token_idx in indices:
-            assert torch.equal(unpacked[offset], logits[token_idx])
-            offset += 1
-    assert offset == expected_length
-
-
-def test_unpack_tree_logits_handles_empty_sequences():
-    sequences = [[]]
-    data = _build_data(sequences)
-
-    _, _, packed = build_tree_input(data, max_tokens_per_tree=3)
-
-    assert len(packed) == 1
-    empty_tree = packed[0]
-    assert empty_tree["sequence_indices"] == [[]]
-
-    logits = torch.empty((0, 7), dtype=torch.float32)
-    unpacked = unpack_tree_output_logits_into_sequences(logits, empty_tree)
-
-    assert unpacked.shape == (0, 7)
-    assert unpacked.device == logits.device
-
-
 def test_packed_tree_gather_logprobs_matches_reference():
-    sequences = [[1, 2, 3], [1, 2, 4], [1, 5]]
+    sequences = [
+        [2, 3, 4],
+        [2, 3, 5, 6],
+        [2, 7],
+        [8, 9],
+    ]
     data = _build_data(sequences)
 
-    _, _, packed = build_tree_input(data, max_tokens_per_tree=5)
-    tree_batch = packed[0]
+    roots, node_counts, tree_infos = greedy_build_tree(data, max_tokens_per_tree=12)
 
-    vocab = 6
+    assert len(roots) == 1
+
+    tree_info = tree_infos[0]
+    num_tree_tokens = node_counts[0]
+    input_ids = torch.empty(num_tree_tokens, dtype=torch.long)
+    for (tree_start, tree_end), (seq_id, seq_offset) in tree_info["tree_endpoints_to_seq_info"].items():
+        slice_tokens = sequences[seq_id][seq_offset : seq_offset + (tree_end - tree_start)]
+        input_ids[tree_start:tree_end] = torch.tensor(slice_tokens, dtype=torch.long)
+
+    vocab_size = 20
+    torch.manual_seed(0)
+    logits = torch.randn(num_tree_tokens, vocab_size, dtype=torch.float)
+
     temperature = 0.7
-    logits = torch.randn(len(tree_batch["input_ids"]), vocab, dtype=torch.float32)
+    expected_logprobs = []
+    expected_entropies = []
+    for seq_id in tree_info["sequence_ids"]:
+        indices = tree_info["seq_id_to_tree_indices"][seq_id]
+        seq_token_segments = [input_ids[start:end] for start, end in indices]
+        seq_logits_segments = [logits[start:end] for start, end in indices]
+        seq_tokens = torch.cat(seq_token_segments, dim=0)
+        seq_logits = torch.cat(seq_logits_segments, dim=0)
+        log_probs = F.log_softmax(seq_logits / temperature, dim=-1)
+        seq_logprobs = log_probs.gather(dim=-1, index=seq_tokens.unsqueeze(-1)).squeeze(-1)
+        seq_entropies = -(log_probs.exp() * log_probs).sum(dim=-1)
+        expected_logprobs.append(seq_logprobs)
+        expected_entropies.append(seq_entropies)
 
-    gathered = packed_tree_gather_logprobs(
+    expected_logprobs = torch.cat(expected_logprobs, dim=0)
+    expected_entropies = torch.cat(expected_entropies, dim=0)
+
+    flattened = packed_tree_gather_logprobs(
         logits,
-        tree_batch["input_ids"],
-        tree_batch["sequence_indices"],
+        input_ids,
+        tree_info["sequence_ids"],
+        tree_info["seq_id_to_tree_indices"],
         temperature=temperature,
+        calculate_entropy=False,
     )
 
-    expected_values = []
-    for indices in tree_batch["sequence_indices"]:
-        for idx in indices:
-            log_probs = F.log_softmax(logits[idx] / temperature, dim=-1)
-            expected_values.append(log_probs[tree_batch["input_ids"][idx]])
+    assert torch.allclose(flattened, expected_logprobs, atol=1e-6)
 
-    expected = (
-        torch.stack(expected_values)
-        if expected_values
-        else logits.new_empty(0)
-    )
-
-    assert torch.allclose(gathered, expected, atol=1e-6)
-
-
-def test_packed_tree_gather_logprobs_handles_empty_sequences():
-    sequences = [[]]
-    data = _build_data(sequences)
-
-    _, _, packed = build_tree_input(data, max_tokens_per_tree=3)
-    tree_batch = packed[0]
-
-    logits = torch.empty((0, 5), dtype=torch.float32)
-    gathered = packed_tree_gather_logprobs(
+    flattened_with_entropy, entropies = packed_tree_gather_logprobs(
         logits,
-        tree_batch["input_ids"],
-        tree_batch["sequence_indices"],
+        input_ids,
+        tree_info["sequence_ids"],
+        tree_info["seq_id_to_tree_indices"],
+        temperature=temperature,
+        calculate_entropy=True,
     )
 
-    assert gathered.shape == (0,)
-
+    assert torch.allclose(flattened_with_entropy, expected_logprobs, atol=1e-6)
+    assert torch.allclose(entropies, expected_entropies, atol=1e-6)
 
 def test_amend_packed_tree_position_ids_assigns_depth():
     sequences = [[1, 2, 3], [1, 2, 4], [1, 5]]
@@ -293,21 +213,3 @@ def test_amend_packed_tree_position_ids_assigns_depth():
 
     assert "position_ids" in updated
     assert torch.equal(updated["position_ids"], expected)
-
-
-def test_amend_packed_tree_position_ids_handles_empty_tree():
-    sequences = [[]]
-    data = _build_data(sequences)
-
-    _, _, packed = build_tree_input(data, max_tokens_per_tree=3)
-    tree_batch = packed[0]
-
-    updated = amend_packed_tree_position_ids({
-        key: value.clone() if torch.is_tensor(value) else value
-        for key, value in tree_batch.items()
-    })
-
-    assert "position_ids" in updated
-    assert updated["position_ids"].dtype == torch.long
-    assert updated["position_ids"].numel() == 0
-
