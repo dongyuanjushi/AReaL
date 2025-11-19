@@ -375,7 +375,7 @@ def main(args):
 
         perf_tracer.save(step=global_step)
 
-        if global_step >= 10:
+        if global_step >= 5:
             break
 
     stats_logger.close()
