@@ -5,6 +5,8 @@ import torch
 from areal.utils import logging
 from areal.utils.functional import gather_logprobs, gather_logprobs_entropy
 from areal.utils.data import pad_and_stack_tensors_along_first_dim
+from areal.utils.perf_tracer import trace_perf, trace_scope
+
 
 logger = logging.getLogger("Tree Training")
 
@@ -36,6 +38,7 @@ class CompressedTokenNode:
         self.children: dict[int, "CompressedTokenNode"] = {}
         self.token_indices: list[int] = [-1] * len(self.tokens)
 
+@trace_perf("tree_training._compress_token_tree")
 def _compress_token_tree(root: TokenNode) -> CompressedTokenNode:
     def _compress_from(node: TokenNode) -> CompressedTokenNode:
         tokens: list[int] = []
@@ -68,6 +71,7 @@ def _compress_token_tree(root: TokenNode) -> CompressedTokenNode:
         }
     return compressed_root
 
+@trace_perf("tree_training._to_sequence_list")
 def _to_sequence_list(data: dict[str, Any]):
     assert "input_ids" in data, "Input data must contain 'input_ids'"
     assert "attention_mask" in data, "Input data must contain 'attention_mask'"
@@ -189,7 +193,7 @@ def simple_build_tree(data: dict[str, Any], visualize: bool = False):
         logger.info("Token Tree Visualization:\n%s", visualization)
     return compressed_root, total_nodes
 
-
+@trace_perf("tree_training.greedy_build_tree")
 def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize: bool = False):
     """Build token trees from a list of token sequences using a greedy packing strategy.
     The number of tokens in each tree will not exceed ``max_tokens_per_tree``.
@@ -246,7 +250,7 @@ def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize:
 
     return compressed_roots, node_counts
 
-
+@trace_perf("tree_training._flatten_tree_tokens")
 def _flatten_tree_tokens(root: CompressedTokenNode) -> tuple[list[int], list[list[int]]]:
     """Collect tokens and ancestor indices via iterative traversal of compressed nodes."""
 
@@ -271,7 +275,7 @@ def _flatten_tree_tokens(root: CompressedTokenNode) -> tuple[list[int], list[lis
 
     return tokens, ancestor_indices
 
-
+@trace_perf("tree_training.build_tree_input")
 def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
     """ First construct token trees from input data, then convert input data into tree-packed format.
     The return value should be a list of dictionaries, each contains input_ids, attention_mask, and sequence_indices for a packed tree structure.
@@ -415,7 +419,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
 
     return roots, node_counts, packed_trees
 
-
+@trace_perf("tree_training.recover_packed_tensor_list")
 def recover_packed_tensor_list(
     tensor_list: list[torch.Tensor], 
     sequence_indices_list: list[list[int]], 
@@ -481,7 +485,7 @@ def amend_packed_tree_position_ids(input_: dict[str, Any]) -> torch.Tensor:
     return input_
 
 
-
+@trace_perf("tree_training.unpack_tree_output_logits_into_sequences")
 def unpack_tree_output_logits_into_sequences(
     logits: torch.Tensor,
     input_data: dict[str, Any],
@@ -522,7 +526,7 @@ def unpack_tree_output_logits_into_sequences(
 
     return flattened
 
-
+@trace_perf("tree_training.packed_tree_gather_logprobs")
 def packed_tree_gather_logprobs(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -848,6 +852,7 @@ def patch_bridge_for_tree_training():
 
 ############################## Model Forward ##############################
 
+@trace_perf("tree_training.model_with_tree_attention_forward")
 def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]):
     """ Patch LLMBridge.model_forward to support tree training with arbitrary attention mask.
     """

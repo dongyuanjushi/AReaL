@@ -16,8 +16,9 @@ from areal.engine.ppo.actor import MegatronPPOActor
 from areal.engine.sglang_remote import RemoteSGLangEngine
 from areal.experimental.openai import ArealOpenAI
 from areal.platforms import current_platform
-from areal.utils import seeding, stats_tracker
+from areal.utils import seeding, stats_tracker, perf_tracer
 from areal.utils.dataloader import create_dataloader
+from areal.utils.perf_tracer import Category
 from areal.utils.device import log_gpu_stats
 from areal.utils.evaluator import Evaluator
 from areal.utils.hf_utils import load_hf_tokenizer
@@ -169,6 +170,10 @@ def main(args):
     actor = MegatronPPOActor(config=config.actor)
     actor.create_process_group(parallel_strategy=parallel_strategy)
 
+    # Configure performance tracer
+    if config.perf_tracer is not None:
+        perf_tracer.configure(config.perf_tracer, rank=rank)
+
     # Create dataset and dataloaders
     train_dataset = get_custom_dataset(
         split="train", dataset_config=config.train_dataset, tokenizer=tokenizer
@@ -250,7 +255,17 @@ def main(args):
             steps_per_epoch=steps_per_epoch,
         )
 
-        with stats_tracker.record_timing("rollout"):
+        with (
+            stats_tracker.record_timing("rollout"),   
+            perf_tracer.trace_scope(
+                "train.rollout",
+                category=Category.COMPUTE,
+                args={
+                    "global_step": global_step,
+                    "epoch_step": step,
+                },
+            ),
+        ):
             batch = actor.prepare_batch(
                 train_dataloader,
                 workflow=workflow,
@@ -258,16 +273,37 @@ def main(args):
             )
 
         if config.actor.recompute_logprob or config.actor.use_decoupled_loss:
-            with stats_tracker.record_timing("recompute_logp"):
+            with (
+                stats_tracker.record_timing("recompute_logp"),
+                perf_tracer.trace_scope(
+                    "train.recompute_logp",
+                    category=Category.COMPUTE,
+                    args={"global_step": global_step},
+                ),
+            ):
                 logp = actor.compute_logp(batch)
                 batch["prox_logp"] = logp
                 log_gpu_stats("recompute logp")
 
-        with stats_tracker.record_timing("compute_advantage"):
+        with (
+            stats_tracker.record_timing("compute_advantage"),
+            perf_tracer.trace_scope(
+                "train.compute_advantage",
+                category=Category.COMPUTE,
+                args={"global_step": global_step},
+            ),
+        ):
             actor.compute_advantages(batch)
             log_gpu_stats("compute advantages")
 
-        with stats_tracker.record_timing("train_step"):
+        with (
+            stats_tracker.record_timing("train_step"),
+            perf_tracer.trace_scope(
+                "train.ppo_update",
+                category=Category.COMPUTE,
+                args={"global_step": global_step},
+            ),
+        ):
             actor.ppo_update(batch)
             actor.step_lr_scheduler()
             log_gpu_stats("ppo update")
@@ -275,16 +311,37 @@ def main(args):
         # pause inference for updating weights, save, and evaluation
         rollout.pause()
 
-        with stats_tracker.record_timing("update_weights"):
+        with (
+            stats_tracker.record_timing("update_weights"),
+            perf_tracer.trace_scope(
+                "train.update_weights",
+                category=Category.COMM,
+                args={"global_step": global_step},
+            ),
+        ):
             actor.update_weights(weight_update_meta)
 
             actor.set_version(global_step + 1)
             rollout.set_version(global_step + 1)
 
-        with stats_tracker.record_timing("save"):
+        with (
+            stats_tracker.record_timing("save"),
+            perf_tracer.trace_scope(
+                "train.saving",
+                category=Category.IO,
+                args={"global_step": global_step},
+            ),
+        ):
             saver.save(actor, epoch, step, global_step, tokenizer=tokenizer)
 
-        with stats_tracker.record_timing("checkpoint_for_recover"):
+        with (
+            stats_tracker.record_timing("checkpoint_for_recover"),
+            perf_tracer.trace_scope(
+                "train.checkpoint_for_recover",
+                category=Category.IO,
+                args={"global_step": global_step},
+            ),
+        ):
             recover_handler.dump(
                 actor,
                 step_info,
@@ -301,9 +358,14 @@ def main(args):
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
 
-        # Upload statistics to the logger (e.g., wandb)
-        stats = stats_tracker.export_all(reduce_group=actor.data_parallel_group)
-        stats_logger.commit(epoch, step, global_step, stats)
+        with perf_tracer.trace_scope(
+            "train.log_stats",
+            category=Category.INSTR,
+            args={"global_step": global_step},
+        ):
+            # Upload statistics to the logger (e.g., wandb)
+            stats = stats_tracker.export_all(reduce_group=actor.data_parallel_group)
+            stats_logger.commit(epoch, step, global_step, stats)
 
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
@@ -311,9 +373,15 @@ def main(args):
         # Resume rollout
         rollout.resume()
 
+        perf_tracer.save(step=global_step)
+
+        if global_step >= 10:
+            break
+
     stats_logger.close()
     rollout.destroy()
     actor.destroy()
+    perf_tracer.save(force=True)
 
 
 if __name__ == "__main__":

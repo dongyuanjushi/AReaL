@@ -72,7 +72,6 @@ from areal.utils.tree_training import (
     amend_packed_tree_position_ids,
     recover_packed_tensor_list,
 )
-
 class _MegatronModelList(list):
     """List wrapper that exposes module-like helpers for Megatron model chunks."""
 
@@ -985,10 +984,12 @@ class MegatronEngine(TrainEngine):
         for model in self.model:
             model.zero_grad_buffer()
         # Assume input_ is identical across context and model parallel group
-        if self.enable_tree_training:
-            mb_list = self.prepare_tree_mb_list(input_)
-        else:
-            mb_list = self.prepare_mb_list(input_)
+        
+        with trace_scope("megatron_engine.train_batch.prepare_mb_list"):
+            if self.enable_tree_training:
+                mb_list = self.prepare_tree_mb_list(input_)
+            else:
+                mb_list = self.prepare_mb_list(input_)
         mb_list = mb_list.to(self.device)
 
         total_loss_weight = (
