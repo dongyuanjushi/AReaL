@@ -308,24 +308,26 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
     ]
     packable_key_set = set(packable_keys)
 
-    tree_infos: list[dict[str, Any]] = []
-    for idx, (root, node_count) in enumerate(zip(roots, node_counts)):
-        tokens, ancestor_indices = _flatten_tree_tokens(root)
-        if len(tokens) != node_count:
-            raise RuntimeError(
-                "Flattened token count does not match node count for tree "
-                f"{idx}: {len(tokens)} != {node_count}."
-            )
-        info_entry: dict[str, Any] = {
-            "root": root,
-            "tokens": tokens,
-            "ancestor_indices": ancestor_indices,
-            "sequence_indices": [],
-            "sequence_ids": [],
-        }
-        if packable_keys:
-            info_entry["packed_fields"] = {key: [] for key in packable_keys}
-        tree_infos.append(info_entry)
+    
+    with trace_scope("build_tree_input.prepare_ancestor_indices"):
+        tree_infos: list[dict[str, Any]] = []
+        for idx, (root, node_count) in enumerate(zip(roots, node_counts)):
+            tokens, ancestor_indices = _flatten_tree_tokens(root)
+            if len(tokens) != node_count:
+                raise RuntimeError(
+                    "Flattened token count does not match node count for tree "
+                    f"{idx}: {len(tokens)} != {node_count}."
+                )
+            info_entry: dict[str, Any] = {
+                "root": root,
+                "tokens": tokens,
+                "ancestor_indices": ancestor_indices,
+                "sequence_indices": [],
+                "sequence_ids": [],
+            }
+            if packable_keys:
+                info_entry["packed_fields"] = {key: [] for key in packable_keys}
+            tree_infos.append(info_entry)
 
     sequences = _to_sequence_list(data)
 
@@ -364,58 +366,61 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
                 return tree_idx, indices
         raise ValueError("Sequence not found in any constructed tree.")
 
-    for seq_idx, sequence in enumerate(sequences):
-        tree_idx, sequence_indices = _locate_tree_with_indices(sequence)
-        info = tree_infos[tree_idx]
-        mask_row = mask_template[seq_idx].bool()
-        value_slices = (
-            {key: data[key][seq_idx][mask_row] for key in packable_keys}
-            if packable_keys
-            else None
-        )
-        info["sequence_indices"].append(sequence_indices)
-        info["sequence_ids"].append(seq_idx)
-        if value_slices is not None:
-            for key, slice_value in value_slices.items():
-                info["packed_fields"][key].append(slice_value)
+    
+    with trace_scope("build_tree_input.prepare_slices"):
+        for seq_idx, sequence in enumerate(sequences):
+            tree_idx, sequence_indices = _locate_tree_with_indices(sequence)
+            info = tree_infos[tree_idx]
+            mask_row = mask_template[seq_idx].bool()
+            value_slices = (
+                {key: data[key][seq_idx][mask_row] for key in packable_keys}
+                if packable_keys
+                else None
+            )
+            info["sequence_indices"].append(sequence_indices)
+            info["sequence_ids"].append(seq_idx)
+            if value_slices is not None:
+                for key, slice_value in value_slices.items():
+                    info["packed_fields"][key].append(slice_value)
 
     remaining_keys = set(data.keys()) - {"input_ids", "attention_mask"} - packable_key_set
 
-    for info in tree_infos:
-        tokens = info["tokens"]
-        ancestor_indices = info["ancestor_indices"]
-        token_tensor = torch.tensor(
-            tokens,
-            dtype=input_template.dtype,
-            device=input_template.device,
-        )
+    with trace_scope("build_tree_input.pack_slices"):
+        for info in tree_infos:
+            tokens = info["tokens"]
+            ancestor_indices = info["ancestor_indices"]
+            token_tensor = torch.tensor(
+                tokens,
+                dtype=input_template.dtype,
+                device=input_template.device,
+            )
 
-        mask_tensor = mask_template.new_zeros((len(tokens), len(tokens)))
-        for row, cols in enumerate(ancestor_indices):
-            if cols:
-                mask_tensor[row, cols] = 1
+            mask_tensor = mask_template.new_zeros((len(tokens), len(tokens)))
+            for row, cols in enumerate(ancestor_indices):
+                if cols:
+                    mask_tensor[row, cols] = 1
 
-        tree_entry: dict[str, Any] = {
-            "input_ids": token_tensor,
-            "attention_mask": mask_tensor,
-            "sequence_indices": info["sequence_indices"],
-            "sequence_ids": info["sequence_ids"],
-        }
+            tree_entry: dict[str, Any] = {
+                "input_ids": token_tensor,
+                "attention_mask": mask_tensor,
+                "sequence_indices": info["sequence_indices"],
+                "sequence_ids": info["sequence_ids"],
+            }
 
-        if packable_keys:
-            # Flatten per-token fields so they align with the order implied by sequence_indices.
-            for key in packable_keys:
-                sequences_values = info["packed_fields"][key]
-                value_template = data[key]
-                if sequences_values:
-                    tree_entry[key] = torch.cat(sequences_values, dim=0)
-                else:
-                    tree_entry[key] = value_template.new_empty((0,))
+            if packable_keys:
+                # Flatten per-token fields so they align with the order implied by sequence_indices.
+                for key in packable_keys:
+                    sequences_values = info["packed_fields"][key]
+                    value_template = data[key]
+                    if sequences_values:
+                        tree_entry[key] = torch.cat(sequences_values, dim=0)
+                    else:
+                        tree_entry[key] = value_template.new_empty((0,))
 
-        for key in remaining_keys:
-            tree_entry[key] = data[key]
+            for key in remaining_keys:
+                tree_entry[key] = data[key]
 
-        packed_trees.append(tree_entry)
+            packed_trees.append(tree_entry)
 
     return roots, node_counts, packed_trees
 
