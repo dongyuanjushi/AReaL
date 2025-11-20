@@ -30,7 +30,7 @@ def test_greedy_build_tree_packs_sequences_under_capacity():
     sequences = [[1, 2, 3], [1, 2, 4], [9], [10, 11, 12, 13], [5, 6]]
     data = _build_data(sequences)
 
-    roots, node_counts = greedy_build_tree(data, max_tokens_per_tree=5)
+    roots, node_counts, _ = greedy_build_tree(data, max_tokens_per_tree=5)
 
     assert len(roots) == 3
     assert node_counts == [5, 4, 2]

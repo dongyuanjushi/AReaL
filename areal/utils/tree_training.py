@@ -275,7 +275,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         tuple[list[CompressedTokenNode], list[int], list[dict[str, Any]]]:
             ``roots`` of the packed token trees, token counts per tree, and tree-packed inputs with per-sequence indices.
     """
-    roots, node_counts, tree_infos = greedy_build_tree(data, max_tokens_per_tree=max_tokens_per_tree)
+    roots, num_tree_tokens_list, tree_infos = greedy_build_tree(data, max_tokens_per_tree=max_tokens_per_tree)
     packed_trees: list[dict[str, Any]] = []
 
     input_template: torch.Tensor = data["input_ids"]
@@ -292,7 +292,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
     sequences = _to_sequence_list(data)
     seq_lens = data["attention_mask"].sum(dim=1, dtype=torch.int32)
 
-    for root, num_tree_tokens, tree_info in zip(roots, tree_infos):
+    for root, num_tree_tokens, tree_info in zip(roots, num_tree_tokens_list, tree_infos):
         sequence_ids = tree_info["sequence_ids"]
         seq_id_to_tree_indices = tree_info["seq_id_to_tree_indices"]
         tree_endpoints_to_seq_info = tree_info["tree_endpoints_to_seq_info"]
@@ -332,7 +332,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
                 cursor += length
             packed_tree[packable_key] = packed_value
         
-    return roots, node_counts, packed_trees
+    return roots, num_tree_tokens_list, packed_trees
 
 def amend_packed_tree_position_ids(input_: dict[str, Any]) -> torch.Tensor:
     """Generate position ids for packed tree inputs.
