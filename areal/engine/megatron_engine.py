@@ -874,6 +874,8 @@ class MegatronEngine(TrainEngine):
         # 2. Correction on position ids for token trees
 
         # entries in input_: attention_mask, input_ids of shape [b, s]
+        if dist.get_rank() == 0:
+            print(f"before build tree input")
         tree_roots, num_tree_tokens, tree_input_mbs = build_tree_input(input_, self.config.mb_spec.max_tokens_per_mb)
         for num_tokens, tree_input in zip(num_tree_tokens, tree_input_mbs):
             amend_packed_tree_position_ids(tree_input)
