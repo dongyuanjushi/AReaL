@@ -13,6 +13,7 @@ from areal.api.cli_args import (
     MegatronEngineConfig,
     OptimizerConfig,
     TrainEngineConfig,
+    MicroBatchSpec,
 )
 from areal.api.io_struct import FinetuneSpec, SaveLoadMeta
 from areal.engine.megatron_engine import MegatronEngine
@@ -157,6 +158,7 @@ def engine():
         experiment_name="test",
         trial_name="test",
         path=MODEL_PATH,
+        mb_spec=MicroBatchSpec(max_tokens_per_mb=1024),
         optimizer=OptimizerConfig(),
         megatron=MegatronEngineConfig(),
     )
@@ -222,6 +224,7 @@ def test_tree_training_forward(engine, mock_tree_input):
         experiment_name="test",
         trial_name="test",
         path=MODEL_PATH,
+        mb_spec=MicroBatchSpec(max_tokens_per_mb=1024),
         optimizer=OptimizerConfig(),
         megatron=MegatronEngineConfig(enable_tree_training=True),
     )
