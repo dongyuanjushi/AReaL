@@ -61,9 +61,18 @@ def test_build_tree_input_constructs_tree_packed_batches():
 
     assert len(roots) == 1
     assert node_counts == [5]
-    tree_batch = packed[0]
+    assert len(packed) == 1
 
-    assert set(tree_batch.keys()) == {"input_ids", "attention_mask", "sequence_indices"}
+    tree_batch = packed[0]
+    expected_keys = {
+        "input_ids",
+        "attention_mask",
+        "sequence_ids",
+        "seq_id_to_tree_indices",
+        "tree_endpoints_to_seq_info",
+        "cu_seqlens",
+    }
+    assert expected_keys.issubset(tree_batch.keys())
     assert tree_batch["input_ids"].device == data["input_ids"].device
     assert tree_batch["attention_mask"].device == data["attention_mask"].device
 
@@ -82,8 +91,32 @@ def test_build_tree_input_constructs_tree_packed_batches():
     )
     assert torch.equal(tree_batch["attention_mask"], expected_mask)
 
-    expected_sequence_indices = [[0, 1, 2], [0, 1, 3], [0, 4]]
-    assert tree_batch["sequence_indices"] == expected_sequence_indices
+    assert tree_batch["sequence_ids"] == [0, 1, 2]
+    expected_cu_seqlens = torch.tensor([0, 3, 6, 8], dtype=torch.int32)
+    assert torch.equal(tree_batch["cu_seqlens"], expected_cu_seqlens)
+
+    # Verify that per-sequence tree indices reconstruct the original token sequences.
+    reconstructed = {}
+    for seq_id in tree_batch["sequence_ids"]:
+        segments = tree_batch["seq_id_to_tree_indices"][seq_id]
+        tokens = []
+        for start, end in segments:
+            assert start <= end
+            tokens.extend(tree_batch["input_ids"][start : end + 1].tolist())
+        reconstructed[seq_id] = tokens
+
+    assert reconstructed[0] == [1, 2, 3]
+    assert reconstructed[1] == [1, 2, 4]
+    assert reconstructed[2] == [1, 5]
+
+    expected_segments = {(0, 0), (1, 1), (2, 2), (3, 3), (4, 4)}
+    assert set(tree_batch["tree_endpoints_to_seq_info"].keys()) == expected_segments
+    for start, end in expected_segments:
+        seq_id, seq_pos = tree_batch["tree_endpoints_to_seq_info"][(start, end)]
+        assert 0 <= seq_id < len(sequences)
+        assert 0 <= seq_pos < len(sequences[seq_id])
+        length = end - start + 1
+        assert seq_pos + length <= len(sequences[seq_id])
 
 
 def test_build_tree_input_packs_additional_tensor_fields():

@@ -194,7 +194,7 @@ def parse_tree_infos(roots: list[CompressedTokenNode]) -> list[dict[str, Any]]:
                     seq_id_to_tree_indices[seq_id] = []
                 seq_id_to_tree_indices[seq_id].append((node.start_node_id, node.end_node_id))
                 tree_endpoints_to_seq_info[(node.start_node_id, node.end_node_id)] = (seq_id, positions[seq_id])
-                positions[seq_id] += node.end_node_id - node.start_node_id
+                positions[seq_id] += node.end_node_id - node.start_node_id + 1
 
         tree_info = {
             "tree_id": root.tree_id,
