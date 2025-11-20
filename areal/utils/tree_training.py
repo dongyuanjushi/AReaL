@@ -425,7 +425,8 @@ def packed_tree_gather_logprobs(
     flattened_logprobs = logits.new_empty(total_tokens)
     flattened_entropies = logits.new_empty(total_tokens) if calculate_entropy else None
     cursor = 0
-    print(f"total seqlens = {total_tokens}, sequence_ids = {sequence_ids}, seq_lens = {seq_lens}")
+    if dist.get_rank() == 0:
+        print(f"total seqlens = {total_tokens}, sequence_ids = {sequence_ids}, seq_lens = {seq_lens}")
 
     for seq_len, seq_id in zip(seq_lens, sequence_ids):
         if seq_id not in seq_id_to_tree_indices:
