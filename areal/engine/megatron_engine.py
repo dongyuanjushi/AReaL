@@ -1258,7 +1258,7 @@ class MegatronEngine(TrainEngine):
                 # TODO: Refactor this
                 tensor_list = [o["output"] for o in output_list]
                 seq_ids_list = [mb["sequence_ids"] for mb in mb_list.padded_mbs]
-                seq_id_to_tree_indices_list = [mb["seq_ids_to_tree_indices"] for mb in mb_list.padded_mbs]
+                seq_id_to_tree_indices_list = [mb["seq_id_to_tree_indices"] for mb in mb_list.padded_mbs]
                 unpacked = []
                 for t, seq_ids, seq_id_to_tree_indices in zip(tensor_list, seq_ids_list, seq_id_to_tree_indices_list):
                     lens = get_seq_lens(seq_ids, seq_id_to_tree_indices)

@@ -304,24 +304,25 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         seq_id_to_tree_indices = tree_info["seq_id_to_tree_indices"]
         tree_endpoints_to_seq_info = tree_info["tree_endpoints_to_seq_info"]
 
-
-        input_ids: list[int] = torch.empty((num_tree_tokens,), dtype=input_template.dtype, device=input_template.device)
-        for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
-            input_ids[tree_start:tree_end + 1] = torch.tensor(
-                sequences[seq_id][seq_start:seq_start + (tree_end - tree_start + 1)], 
-                dtype=input_template.dtype, 
-                device=input_template.device
-            )
-         
-        mask_tensor = mask_template.new_zeros((num_tree_tokens, num_tree_tokens))
-        for node in root.tree_nodes:
-            for i in range(node.start_node_id, node.end_node_id + 1):
-                for j in range(0, i + 1):
-                    for ancestor in node.ancestors:
-                        if ancestor.start_node_id <= j < ancestor.end_node_id + 1:
+        with trace_scope("tree_training.build_tree_input.pack_input_ids"):
+            input_ids: list[int] = torch.empty((num_tree_tokens,), dtype=input_template.dtype, device=input_template.device)
+            for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
+                input_ids[tree_start:tree_end + 1] = torch.tensor(
+                    sequences[seq_id][seq_start:seq_start + (tree_end - tree_start + 1)], 
+                    dtype=input_template.dtype, 
+                    device=input_template.device
+                )
+        
+        with trace_scope("tree_training.build_tree_input.build_attention_mask"):
+            mask_tensor = mask_template.new_zeros((num_tree_tokens, num_tree_tokens))
+            for node in root.tree_nodes:
+                for i in range(node.start_node_id, node.end_node_id + 1):
+                    for j in range(0, i + 1):
+                        for ancestor in node.ancestors:
+                            if ancestor.start_node_id <= j < ancestor.end_node_id + 1:
+                                mask_tensor[i][j] = True
+                        if node.start_node_id <= j < node.end_node_id + 1:
                             mask_tensor[i][j] = True
-                    if node.start_node_id <= j < node.end_node_id + 1:
-                        mask_tensor[i][j] = True
         
         lens = [seq_lens[seq_id].item() for seq_id in sequence_ids]
         cu_seqlens = torch.cumsum(torch.tensor([0] + lens, dtype=torch.int32), dim=0)
@@ -334,15 +335,16 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             "cu_seqlens": cu_seqlens,
         }
         
-        for packable_key in packable_key_set:
-            packable_value = data[packable_key]
-            packed_value = torch.empty((sum(lens), *packable_value.shape[2:]), dtype=packable_value.dtype, device=packable_value.device)
-            cursor = 0
-            for length, seq_id in zip(lens, sequence_ids):
-                packed_value[cursor: cursor + length] = packable_value[seq_id][:length]
-                cursor += length
-            packed_tree[packable_key] = packed_value
-
+        with trace_scope("tree_training.build_tree_input.pack_others"):
+            for packable_key in packable_key_set:
+                packable_value = data[packable_key]
+                packed_value = torch.empty((sum(lens), *packable_value.shape[2:]), dtype=packable_value.dtype, device=packable_value.device)
+                cursor = 0
+                for length, seq_id in zip(lens, sequence_ids):
+                    packed_value[cursor: cursor + length] = packable_value[seq_id][:length]
+                    cursor += length
+                packed_tree[packable_key] = packed_value
+                
         for non_packable_key in non_packable_keys:
             packed_tree[non_packable_key] = data[non_packable_key]
 
