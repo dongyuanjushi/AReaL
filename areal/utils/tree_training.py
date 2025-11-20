@@ -329,11 +329,14 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             "cu_seqlens": cu_seqlens,
         }
         
+        print(f"seq_lens = {seq_lens}, lens = {lens}, cu_seqlens = {cu_seqlens}, sequence_ids = {sequence_ids}")
         for packable_key in packable_key_set:
             packable_value = data[packable_key][sequence_ids]
-            packed_value = torch.empty((sum(seq_lens), *packable_value.shape[1:]), dtype=packable_value.dtype, device=packable_value.device)
+            packed_value = torch.empty((sum(lens), *packable_value.shape[1:]), dtype=packable_value.dtype, device=packable_value.device)
             cursor = 0
+            print("packable_key", packable_key)
             for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
+                print("tree_start", tree_start, "tree_end", tree_end, "seq_id", seq_id, "seq_start", seq_start)
                 length = tree_end - tree_start + 1
                 packed_value[tree_start:tree_end + 1] = packable_value[cursor:cursor + length]
                 cursor += length
