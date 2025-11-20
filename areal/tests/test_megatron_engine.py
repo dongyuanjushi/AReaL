@@ -60,6 +60,80 @@ def mock_input(
         attention_mask=attn_mask,
     )
 
+@pytest.fixture(scope="module")
+def mock_tree_input(
+    batch_size=5,
+    tree_tokens=30,
+    total_tokens=60,
+    device=current_platform.device_type,
+):
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if total_tokens < tree_tokens:
+        raise ValueError("total_tokens must be >= tree_tokens")
+    if total_tokens < batch_size:
+        raise ValueError("total_tokens must be >= batch_size to allocate at least one token per sequence")
+
+    device = device if isinstance(device, torch.device) else torch.device(device)
+    lengths = [tree_tokens]
+    remaining_tokens = total_tokens - tree_tokens
+    remaining_slots = batch_size - 1
+
+    if remaining_slots:
+        if remaining_tokens < remaining_slots:
+            raise ValueError("Not enough tokens available for the requested batch size")
+        for index in range(remaining_slots):
+            slots_left = remaining_slots - index - 1
+            max_assignable = min(tree_tokens, remaining_tokens - slots_left)
+            share = max(1, min(max_assignable, remaining_tokens // (slots_left + 1)))
+            lengths.append(share)
+            remaining_tokens -= share
+        if remaining_tokens != 0:
+            lengths[-1] += remaining_tokens
+            remaining_tokens = 0
+    else:
+        if total_tokens != tree_tokens:
+            raise ValueError("total_tokens must equal tree_tokens when batch_size is 1")
+
+    lengths = [int(l) for l in lengths]
+    if sum(lengths) != total_tokens:
+        raise RuntimeError("Token length allocation mismatch")
+
+    base_tokens = torch.arange(1, tree_tokens + 1, dtype=torch.long, device=device)
+    max_len = max(lengths)
+    input_ids = torch.full((batch_size, max_len), 0, dtype=torch.long, device=device)
+    attention_mask = torch.zeros((batch_size, max_len), dtype=torch.bool, device=device)
+
+    sequences = []
+    for idx, length in enumerate(lengths):
+        seq_tokens = base_tokens[:length]
+        input_ids[idx, :length] = seq_tokens
+        attention_mask[idx, :length] = True
+        sequences.append(seq_tokens.tolist())
+
+    def _count_unique_nodes(seqs: list[list[int]]) -> int:
+        root: dict[int, dict] = {}
+        count = 0
+        for seq in seqs:
+            node = root
+            for token in seq:
+                if token not in node:
+                    node[token] = {}
+                    count += 1
+                node = node[token]
+        return count
+
+    unique_nodes = _count_unique_nodes(sequences)
+    if unique_nodes != tree_tokens:
+        raise RuntimeError(
+            f"Constructed tree has {unique_nodes} tokens, expected {tree_tokens}"
+        )
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+    }
+
 
 def mock_loss_fn(logits: torch.Tensor, input_data: dict) -> torch.Tensor:
     """Mock loss function for testing."""
@@ -117,7 +191,7 @@ def test_simple_train(engine, mock_input):
     logger.info(f"Train done, result={train_result}")
 
 
-def test_tree_training_forward(engine, mock_input):
+def test_tree_training_forward(engine, mock_tree_input):
     def calc_logprobs_tree_training(logits, input_data):
         input_ids = input_data["input_ids"]
         sequence_ids = input_data["sequence_ids"]
@@ -137,7 +211,7 @@ def test_tree_training_forward(engine, mock_input):
 
     engine.eval()
     logprob_baseline =  engine.forward(
-        input_=mock_input,
+        input_=mock_tree_input,
         post_hook=calc_logprobs,
         aggregate_fn=lambda xs: torch.cat(xs, dim=-1),
     )
@@ -155,7 +229,7 @@ def test_tree_training_forward(engine, mock_input):
     tree_engine.initialize(addr=None, ft_spec=ft_spec, parallel_strategy=alloc_mode.train)
     tree_engine.eval()
     logprob_tree = tree_engine.forward(
-        input_=mock_input,
+        input_=mock_tree_input,
         post_hook=calc_logprobs_tree_training,
         aggregate_fn=lambda xs: torch.cat(xs, dim=-1),
     )
