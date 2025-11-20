@@ -299,7 +299,11 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
 
         input_ids: list[int] = torch.empty((num_tree_tokens,), dtype=input_template.dtype, device=input_template.device)
         for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
-            input_ids[tree_start:tree_end] = sequences[seq_id][seq_start:seq_start + (tree_end - tree_start)]
+            input_ids[tree_start:tree_end] = torch.tensor(
+                sequences[seq_id][seq_start:seq_start + (tree_end - tree_start)], 
+                dtype=input_template.dtype, 
+                device=input_template.device
+            )
          
         mask_tensor = mask_template.new_zeros((num_tree_tokens, num_tree_tokens))
         for node in root.tree_nodes:
