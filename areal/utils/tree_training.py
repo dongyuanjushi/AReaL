@@ -2,6 +2,7 @@ from typing import Any
 from collections import defaultdict
 
 import torch
+import torch.distributed as dist
 
 from areal.utils import logging
 from areal.utils.functional import gather_logprobs, gather_logprobs_entropy
@@ -226,7 +227,6 @@ def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize:
     forests: list[dict[str, Any]] = []
 
     for seq_id, seq in enumerate(normalized_sequences):
-        print("Inserting sequence", seq_id)
         inserted = False
 
         for tree_id, tree in enumerate(forests):
@@ -335,6 +335,8 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             for packable_key in packable_key_set:
                 packable_value = data[packable_key]
                 packed_value = torch.empty((sum(lens), *packable_value.shape[2:]), dtype=packable_value.dtype, device=packable_value.device)
+                if dist.get_rank() == 0:
+                    print(f"In packed_value {packable_key} building: packed_value.shape={packed_value.shape}, packable_value.shape={packable_value.shape}, lens={lens}, sequence_ids={sequence_ids}")
                 cursor = 0
                 for length, seq_id in zip(lens, sequence_ids):
                     packed_value[cursor: cursor + length] = packable_value[seq_id][:length]

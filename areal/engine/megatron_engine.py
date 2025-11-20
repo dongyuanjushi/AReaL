@@ -1262,11 +1262,19 @@ class MegatronEngine(TrainEngine):
                 unpacked = []
                 for t, seq_ids, seq_id_to_tree_indices in zip(tensor_list, seq_ids_list, seq_id_to_tree_indices_list):
                     lens = get_seq_lens(seq_ids, seq_id_to_tree_indices)
+                    if dist.get_rank() == 0:
+                        print(f"in forward output processing: t.shape={t.shape} seq_ids={seq_ids} lens={lens} total_lens={sum(lens)}")
                     unpacked.extend(unpack_sequence(t, lens=lens, dim=0))
+
                 forward_indices = flat2d(seq_ids_list)
                 backward_indices = [forward_indices.index(i) for i in range(len(forward_indices))]
+                if dist.get_rank() == 0:
+                    print(f"in forward output processing: forward_indices={forward_indices} backward_indices={backward_indices}")
+                    print(f"in forward output processing: unpacked lengths={[u.shape[0] for u in unpacked]} total={sum(u.shape[0] for u in unpacked)}")
                 reordered = reorder_list(unpacked, backward_indices)
                 result = pad_and_stack_tensors_along_first_dim(reordered)
+                if dist.get_rank() == 0:
+                    print(f"in forward output processing: result.shape={result.shape}")
             else:
                 res = aggregate_fn([o["output"] for o in output_list])
                 output_seqlens = [output_seqlens[i] for i in mb_list.forward_indices]
