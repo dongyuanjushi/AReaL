@@ -95,8 +95,6 @@ class PPOActor:
                     torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
                 )
                 logprobs = gather_logprobs(logits, labels, temperature or 1.0)
-            if dist.get_rank() == 0:
-                print(f"compute_logp logprobs.shape={logprobs.shape}")
             return logprobs
 
         self.engine.eval()
@@ -141,15 +139,11 @@ class PPOActor:
         if not self.config.use_decoupled_loss and self.config.recompute_logprob:
             # Overwrite logprobs produced by the inference engine
             old_logp = data["logprobs"] = data["prox_logp"]
-            if dist.get_rank() == 0:
-                print(f"Recomputed old_logp.shape={old_logp.shape}")
         else:
             old_logp = torch.roll(data["logprobs"], shifts=-1, dims=-1)
             if not self.config.use_decoupled_loss:
                 # prox logp not available, use inferenced logp
                 data["prox_logp"] = old_logp
-            if dist.get_rank() == 0:
-                print(f"Recomputed old_logp.shape={old_logp.shape}")
         ref_logp = data.get("ref_logp", torch.zeros_like(old_logp))
         ref_logp *= loss_mask
         old_logp *= loss_mask
@@ -378,8 +372,6 @@ def grpo_loss_fn(
             temperature,
             calculate_entropy=True,
         )
-        if dist.get_rank() == 0:
-            print(f"logprobs.shape={logprobs.shape}, old_logp.shape={old_logp.shape}, prox_logp.shape={prox_logp.shape}")
     else:
         labels = input_data.get(
             "rolled_input_ids",
