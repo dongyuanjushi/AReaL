@@ -75,7 +75,7 @@ def _compress_token_tree(root: TokenNode) -> CompressedTokenNode:
             (_, next_child) = next(
                 iter(sorted(current.children.items(), key=lambda item: item[0]))
             )
-            if current.sequence_ids != next_child.sequence_ids:
+            if current.sequence_ids != next_child.sequence_ids and not current.is_end_of_sequence:
                 raise ValueError(
                     "Sequence IDs do not match along compression path."
                     f" Current IDs: {current.sequence_ids}, Next IDs: {next_child.sequence_ids}"
