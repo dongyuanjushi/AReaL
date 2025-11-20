@@ -240,6 +240,16 @@ def test_tree_training_forward(engine, mock_tree_input):
         aggregate_fn=lambda xs: torch.cat(xs, dim=-1),
     )
     
+    print(f"logprob_baseline={logprob_baseline}")
+    print(f"logprob_tree={logprob_tree}")
+    # print where logprob baseline and logprob_tree are zeros
+    print(f"logprob_baseline == 0 at positions: {(logprob_baseline == 0).nonzero(as_tuple=True)}")
+    print(f"logprob_tree == 0 at positions: {(logprob_tree == 0).nonzero(as_tuple=True)}")
+
+    # print where logprob_baseline and logprob_tree differ
+    diff_positions = (logprob_baseline - logprob_tree).abs() > 1e-6
+    print(f"Positions where logprob_baseline and logprob_tree differ: {diff_positions.nonzero(as_tuple=True)}")
+    print(f"diff = {logprob_baseline - logprob_tree}")
     assert torch.allclose(logprob_baseline, logprob_tree, atol=1e-6)
 
 
