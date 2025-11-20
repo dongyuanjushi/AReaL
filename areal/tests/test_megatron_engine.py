@@ -160,7 +160,9 @@ def engine():
         path=MODEL_PATH,
         mb_spec=MicroBatchSpec(max_tokens_per_mb=1024),
         optimizer=OptimizerConfig(),
-        megatron=MegatronEngineConfig(),
+        megatron=MegatronEngineConfig(
+            use_deterministic_algorithms=True,
+        ),
     )
     alloc_mode = AllocationMode.from_str("d1p1t1")
     ft_spec = FinetuneSpec(total_train_epochs=1, dataset_size=128, train_batch_size=8)
@@ -226,7 +228,10 @@ def test_tree_training_forward(engine, mock_tree_input):
         path=MODEL_PATH,
         mb_spec=MicroBatchSpec(max_tokens_per_mb=1024),
         optimizer=OptimizerConfig(),
-        megatron=MegatronEngineConfig(enable_tree_training=True),
+        megatron=MegatronEngineConfig(
+            enable_tree_training=True, 
+            use_deterministic_algorithms=True
+        ),
     )
     tree_engine = MegatronEngine(config)
     alloc_mode = AllocationMode.from_str("d1p1t1")
