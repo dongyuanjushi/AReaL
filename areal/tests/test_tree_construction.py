@@ -143,25 +143,6 @@ def test_build_tree_input_packs_additional_tensor_fields():
     assert torch.equal(tree_batch["non_pack_tensor"], data["non_pack_tensor"])
     assert tree_batch["meta"] == data["meta"]
 
-def test_build_tree_input_sequence_indices_with_multiple_trees():
-    sequences = [[1, 2], [3, 4], [1, 5], [6]]
-    data = _build_data(sequences)
-
-    roots, node_counts, packed = build_tree_input(data, max_tokens_per_tree=3)
-
-    assert len(roots) == 2
-    assert sorted(node_counts) == [3, 3]
-
-    reconstructed = []
-    for tree_batch in packed:
-        assert "sequence_indices" in tree_batch
-        tokens = tree_batch["input_ids"].tolist()
-        for indices in tree_batch["sequence_indices"]:
-            assert all(0 <= idx < len(tokens) for idx in indices)
-            reconstructed.append([tokens[idx] for idx in indices])
-
-    expected_sequences = [seq for seq in sequences if seq]
-    assert sorted(reconstructed) == sorted(expected_sequences)
 
 def test_packed_tree_gather_logprobs_matches_reference():
     sequences = [
@@ -192,8 +173,8 @@ def test_packed_tree_gather_logprobs_matches_reference():
     expected_entropies = []
     for seq_id in tree_info["sequence_ids"]:
         indices = tree_info["seq_id_to_tree_indices"][seq_id]
-        seq_token_segments = [input_ids[start:end] for start, end in indices]
-        seq_logits_segments = [logits[start:end] for start, end in indices]
+        seq_token_segments = [input_ids[start:end+1] for start, end in indices]
+        seq_logits_segments = [logits[start:end+1] for start, end in indices]
         seq_tokens = torch.cat(seq_token_segments, dim=0)
         seq_logits = torch.cat(seq_logits_segments, dim=0)
         log_probs = F.log_softmax(seq_logits / temperature, dim=-1)

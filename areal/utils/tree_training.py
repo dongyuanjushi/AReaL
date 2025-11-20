@@ -433,8 +433,8 @@ def packed_tree_gather_logprobs(
         tree_token_segments = []
         tree_logits_segments = []
         for start, end in tree_indices_list:
-            tree_token_segments.append(input_ids[start:end])
-            tree_logits_segments.append(logits[start:end])
+            tree_token_segments.append(input_ids[start:end+1])
+            tree_logits_segments.append(logits[start:end+1])
         tree_tokens = torch.cat(tree_token_segments, dim=0)
         tree_logits = torch.cat(tree_logits_segments, dim=0)
 
