@@ -192,6 +192,9 @@ def test_simple_train(engine, mock_input):
 
 
 def test_tree_training_forward(engine, mock_tree_input):
+    for k, v in mock_tree_input.items():
+        print(f"mock_tree_input[{k}].shape={v.shape}, dtype={v.dtype} v=\n{v}")
+
     def calc_logprobs_tree_training(logits, input_data):
         input_ids = input_data["input_ids"]
         sequence_ids = input_data["sequence_ids"]
