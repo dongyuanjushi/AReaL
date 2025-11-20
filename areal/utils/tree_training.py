@@ -78,6 +78,7 @@ def _compress_token_tree(root: TokenNode) -> CompressedTokenNode:
             if current.sequence_ids != next_child.sequence_ids:
                 raise ValueError(
                     "Sequence IDs do not match along compression path."
+                    f" Current IDs: {current.sequence_ids}, Next IDs: {next_child.sequence_ids}"
                 )
             if next_child.node_id != current.node_id + 1:
                 raise ValueError(
