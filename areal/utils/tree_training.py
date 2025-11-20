@@ -224,7 +224,7 @@ def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize:
 
     normalized_sequences = _to_sequence_list(data)
     print(f"Building token trees for {len(normalized_sequences)} sequences with max_tokens_per_tree={max_tokens_per_tree}.")
-    for k, v in data:
+    for k, v in data.items():
         print(f"  data key: {k}, type: {type(v)}, shape: {v.shape if torch.is_tensor(v) else 'N/A'}")
 
     forests: list[dict[str, Any]] = []
