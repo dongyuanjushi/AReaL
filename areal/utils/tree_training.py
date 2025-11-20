@@ -395,7 +395,7 @@ def get_seq_lens(
         if seq_id not in seq_id_to_tree_indices:
             raise ValueError(f"Sequence ID {seq_id} not found in seq_id_to_tree_indices.")
         indices = seq_id_to_tree_indices[seq_id]
-        length = sum(end - start for start, end in indices)
+        length = sum(end - start + 1 for start, end in indices)
         sequence_lens.append(length)
     return sequence_lens
 
