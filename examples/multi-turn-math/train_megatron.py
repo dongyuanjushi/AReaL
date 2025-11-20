@@ -307,9 +307,12 @@ def main(args):
             actor.ppo_update(batch)
             actor.step_lr_scheduler()
             log_gpu_stats("ppo update")
+        
+        print(f"Completed global_step={global_step}")
 
         # pause inference for updating weights, save, and evaluation
         rollout.pause()
+        print(f"Paused rollout at global_step={global_step}")
 
         with (
             stats_tracker.record_timing("update_weights"),
@@ -323,6 +326,7 @@ def main(args):
 
             actor.set_version(global_step + 1)
             rollout.set_version(global_step + 1)
+        print(f"Updated weights at global_step={global_step}")
 
         with (
             stats_tracker.record_timing("save"),
@@ -333,6 +337,7 @@ def main(args):
             ),
         ):
             saver.save(actor, epoch, step, global_step, tokenizer=tokenizer)
+        print(f"Saved checkpoint at global_step={global_step}")
 
         with (
             stats_tracker.record_timing("checkpoint_for_recover"),
@@ -352,11 +357,10 @@ def main(args):
                 tokenizer=tokenizer,
             )
 
+        print(f"Created recover checkpoint at global_step={global_step}")
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
-
-        dist.barrier(device_ids=[actor.device.index])
-        current_platform.synchronize()
+        print(f"Synchronized at global_step={global_step}")
 
         with perf_tracer.trace_scope(
             "train.log_stats",
@@ -366,14 +370,18 @@ def main(args):
             # Upload statistics to the logger (e.g., wandb)
             stats = stats_tracker.export_all(reduce_group=actor.data_parallel_group)
             stats_logger.commit(epoch, step, global_step, stats)
+        print(f"Logged stats at global_step={global_step}")
 
         dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
+        print(f"Synchronized before resuming rollout at global_step={global_step}")
 
         # Resume rollout
         rollout.resume()
+        print(f"Resumed rollout at global_step={global_step}")
 
         perf_tracer.save(step=global_step)
+        print(f"Saved perf trace at global_step={global_step}")
 
         if global_step >= 5:
             break
