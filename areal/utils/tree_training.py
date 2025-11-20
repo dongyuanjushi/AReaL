@@ -289,6 +289,8 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         and value.shape == input_template.shape
     ]
     packable_key_set = set(packable_keys)
+    non_packable_keys = set(data.keys()) - packable_key_set - {"input_ids", "attention_mask"}
+
     sequences = _to_sequence_list(data)
     seq_lens = data["attention_mask"].sum(dim=1, dtype=torch.int32)
 
@@ -329,13 +331,17 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         
         for packable_key in packable_key_set:
             packable_value = data[packable_key][sequence_ids]
-            packed_value = torch.empty((num_tree_tokens, *packable_value.shape[1:]), dtype=packable_value.dtype, device=packable_value.device)
+            packed_value = torch.empty((sum(seq_lens), *packable_value.shape[1:]), dtype=packable_value.dtype, device=packable_value.device)
             cursor = 0
             for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
-                length = tree_end - tree_start
-                packed_value[tree_start:tree_end] = packable_value[cursor:cursor + length]
+                length = tree_end - tree_start + 1
+                packed_value[tree_start:tree_end + 1] = packable_value[cursor:cursor + length]
                 cursor += length
             packed_tree[packable_key] = packed_value
+
+        for non_packable_key in non_packable_keys:
+            packed_tree[non_packable_key] = data[non_packable_key]
+
         packed_trees.append(packed_tree)
     return roots, num_tree_tokens_list, packed_trees
 
