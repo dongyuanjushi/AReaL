@@ -397,7 +397,7 @@ def main(args):
         if dist.get_rank() == 0:
             print(f"Saved perf trace at global_step={global_step}")
 
-        if global_step >= 5:
+        if global_step >= 0:
             break
 
     stats_logger.close()
