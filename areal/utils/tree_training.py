@@ -305,14 +305,32 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         
         with trace_scope("tree_training.build_tree_input.build_attention_mask"):
             mask_tensor = mask_template.new_zeros((num_tree_tokens, num_tree_tokens))
-            for node in root.tree_nodes:
-                for i in range(node.start_node_id, node.end_node_id + 1):
-                    for j in range(0, i + 1):
-                        for ancestor in node.ancestors:
-                            if ancestor.start_node_id <= j < ancestor.end_node_id + 1:
-                                mask_tensor[i][j] = True
-                        if node.start_node_id <= j < node.end_node_id + 1:
-                            mask_tensor[i][j] = True
+            tril_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+            for seq_id in sequence_ids:
+                segments = seq_id_to_tree_indices.get(seq_id, [])
+                if not segments:
+                    continue
+
+                seq_position_chunks = [
+                    torch.arange(start, end + 1, device=mask_tensor.device)
+                    for start, end in segments
+                    if end >= start
+                ]
+                if not seq_position_chunks:
+                    continue
+
+                seq_positions = torch.cat(seq_position_chunks, dim=0)
+                seq_len = seq_positions.numel()
+                if seq_len == 0:
+                    continue
+
+                rows_cols = tril_cache.get(seq_len)
+                if rows_cols is None:
+                    rows_cols = torch.tril_indices(seq_len, seq_len, device=mask_tensor.device)
+                    tril_cache[seq_len] = rows_cols
+                rows, cols = rows_cols
+                mask_tensor[seq_positions[rows], seq_positions[cols]] = True
         
         lens = [seq_lens[seq_id].item() for seq_id in sequence_ids]
         cu_seqlens = torch.cumsum(torch.tensor([0] + lens, dtype=torch.int32), dim=0)
