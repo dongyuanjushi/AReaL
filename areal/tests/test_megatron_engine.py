@@ -19,6 +19,8 @@ from areal.engine.megatron_engine import MegatronEngine
 from areal.platforms import current_platform
 from areal.utils import logging
 from areal.utils.device import log_gpu_stats
+from areal.utils.tree_training import packed_tree_gather_logprobs
+from areal.utils.functional import gather_logprobs
 
 logger = logging.getLogger("MegatronEngine Test")
 
@@ -113,6 +115,52 @@ def test_simple_train(engine, mock_input):
     )
     engine.step_lr_scheduler()
     logger.info(f"Train done, result={train_result}")
+
+
+def test_tree_training_forward(engine, mock_input):
+    def calc_logprobs_tree_training(logits, input_data):
+        input_ids = input_data["input_ids"]
+        sequence_ids = input_data["sequence_ids"]
+        seq_id_to_tree_indices = input_data["seq_id_to_tree_indices"]
+        logprobs = packed_tree_gather_logprobs(
+            logits, input_ids, sequence_ids, seq_id_to_tree_indices, 1.0
+        )
+        return logprobs
+
+    def calc_logprobs(logits, input_data):
+        labels = input_data.get(
+            "rolled_input_ids",
+            torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
+        )
+        logprobs = gather_logprobs(logits, labels, 1.0)
+        return logprobs
+
+    engine.eval()
+    logprob_baseline =  engine.forward(
+        input_=mock_input,
+        post_hook=calc_logprobs,
+        aggregate_fn=lambda xs: torch.cat(xs, dim=-1),
+    )
+    config = TrainEngineConfig(
+        experiment_name="test",
+        trial_name="test",
+        path=MODEL_PATH,
+        optimizer=OptimizerConfig(),
+        megatron=MegatronEngineConfig(enable_tree_training=True),
+    )
+    tree_engine = MegatronEngine(config)
+    alloc_mode = AllocationMode.from_str("d1p1t1")
+    ft_spec = FinetuneSpec(total_train_epochs=1, dataset_size=128, train_batch_size=8)
+    tree_engine.create_process_group(alloc_mode.train)
+    tree_engine.initialize(addr=None, ft_spec=ft_spec, parallel_strategy=alloc_mode.train)
+    tree_engine.eval()
+    logprob_tree = tree_engine.forward(
+        input_=mock_input,
+        post_hook=calc_logprobs_tree_training,
+        aggregate_fn=lambda xs: torch.cat(xs, dim=-1),
+    )
+    
+    assert torch.allclose(logprob_baseline, logprob_tree, atol=1e-6)
 
 
 @torch.no_grad()
