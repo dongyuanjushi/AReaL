@@ -177,7 +177,6 @@ def test_packed_tree_gather_logprobs_matches_reference():
         seq_logits_segments = [logits[start:end+1] for start, end in indices]
         seq_tokens = torch.cat(seq_token_segments, dim=0)
         seq_logits = torch.cat(seq_logits_segments, dim=0)
-        print(f"input_ids = {input_ids} indices = {indices} seq_tokens = {seq_tokens} ")
         log_probs = F.log_softmax(seq_logits / temperature, dim=-1)
         seq_logprobs = log_probs.gather(dim=-1, index=seq_tokens.unsqueeze(-1)).squeeze(-1)
         seq_entropies = -(log_probs.exp() * log_probs).sum(dim=-1)
