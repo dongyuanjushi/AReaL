@@ -276,19 +276,16 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         tuple[list[CompressedTokenNode], list[int], list[dict[str, Any]]]:
             ``roots`` of the packed token trees, token counts per tree, and tree-packed inputs with per-sequence indices.
     """
-    if dist.get_rank() == 0:
-        print(f"In build tree input bp0")
+    print(f"Rank {dist.get_rank()} In build tree input bp0")
     roots, num_tree_tokens_list, tree_infos = greedy_build_tree(data, max_tokens_per_tree=max_tokens_per_tree)
     packed_trees: list[dict[str, Any]] = []
     
-    if dist.get_rank() == 0:
-        print(f"In build tree input bp1")
+    print(f"Rank {dist.get_rank()} In build tree input bp1")
 
     input_template: torch.Tensor = data["input_ids"]
     mask_template: torch.Tensor = data["attention_mask"]
     
-    if dist.get_rank() == 0:
-        print(f"In build tree input bp2")
+    print(f"Rank {dist.get_rank()} In build tree input bp2")
 
     packable_keys = [
         key
@@ -303,14 +300,12 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
     sequences = _to_sequence_list(data)
     seq_lens = data["attention_mask"].sum(dim=1, dtype=torch.int32)
     
-    if dist.get_rank() == 0:
-        print(f"In build tree input bp3")
+    print(f"Rank {dist.get_rank()} In build tree input bp3")
 
     count = 0
     for root, num_tree_tokens, tree_info in zip(roots, num_tree_tokens_list, tree_infos):
-        if dist.get_rank() == 0:
-            print(f"In build tree input count={count}")
-            count += 1
+        print(f"Rank {dist.get_rank()} In build tree input count={count}")
+        count += 1
         sequence_ids = tree_info["sequence_ids"]
         seq_id_to_tree_indices = tree_info["seq_id_to_tree_indices"]
         tree_endpoints_to_seq_info = tree_info["tree_endpoints_to_seq_info"]
@@ -318,11 +313,9 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         with trace_scope("tree_training.build_tree_input.pack_input_ids"):
             input_ids: list[int] = torch.empty((num_tree_tokens,), dtype=input_template.dtype, device=input_template.device)
             for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
-                input_ids[tree_start:tree_end + 1] = torch.tensor(
-                    sequences[seq_id][seq_start:seq_start + (tree_end - tree_start + 1)], 
-                    dtype=input_template.dtype, 
-                    device=input_template.device
-                )
+                print(f"Rank {dist.get_rank()} In build tree input count={count} after pack_input_ids")
+                input_ids[tree_start:tree_end + 1] = input_template[seq_id][seq_start:seq_start + (tree_end - tree_start + 1)]
+        print(f"Rank {dist.get_rank()} In build tree input count={count} after pack_input_ids")
         
         with trace_scope("tree_training.build_tree_input.build_attention_mask"):
             mask_tensor = mask_template.new_zeros((num_tree_tokens, num_tree_tokens))
@@ -334,6 +327,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
                                 mask_tensor[i][j] = True
                         if node.start_node_id <= j < node.end_node_id + 1:
                             mask_tensor[i][j] = True
+        print(f"Rank {dist.get_rank()} In build tree input count={count} after build_attention_mask")
         
         lens = [seq_lens[seq_id].item() for seq_id in sequence_ids]
         cu_seqlens = torch.cumsum(torch.tensor([0] + lens, dtype=torch.int32), dim=0)
@@ -345,6 +339,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             "tree_endpoints_to_seq_info": tree_endpoints_to_seq_info,
             "cu_seqlens": cu_seqlens,
         }
+        print(f"Rank {dist.get_rank()} In build tree input count={count} before packed_others")
         
         with trace_scope("tree_training.build_tree_input.pack_others"):
             for packable_key in packable_key_set:
