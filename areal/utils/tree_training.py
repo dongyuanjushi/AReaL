@@ -223,10 +223,6 @@ def greedy_build_tree(data: dict[str, Any], max_tokens_per_tree: int, visualize:
         raise ValueError("max_tokens_per_tree must be a positive integer")
 
     normalized_sequences = _to_sequence_list(data)
-    print(f"Building token trees for {len(normalized_sequences)} sequences with max_tokens_per_tree={max_tokens_per_tree}.")
-    for k, v in data.items():
-        print(f"  data key: {k}, type: {type(v)}, shape: {v.shape if torch.is_tensor(v) else 'N/A'}")
-
     forests: list[dict[str, Any]] = []
 
     for seq_id, seq in enumerate(normalized_sequences):
@@ -344,7 +340,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
                     packed_value[cursor: cursor + length] = packable_value[seq_id][:length]
                     cursor += length
                 packed_tree[packable_key] = packed_value
-                
+
         for non_packable_key in non_packable_keys:
             packed_tree[non_packable_key] = data[non_packable_key]
 
@@ -427,6 +423,7 @@ def packed_tree_gather_logprobs(
     flattened_logprobs = logits.new_empty(total_tokens)
     flattened_entropies = logits.new_empty(total_tokens) if calculate_entropy else None
     cursor = 0
+    print(f"total seqlens = {total_tokens}, sequence_ids = {sequence_ids}, seq_lens = {seq_lens}")
 
     for seq_len, seq_id in zip(seq_lens, sequence_ids):
         if seq_id not in seq_id_to_tree_indices:
