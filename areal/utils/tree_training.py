@@ -98,7 +98,7 @@ def _compress_token_tree(root: TokenNode) -> CompressedTokenNode:
     
     if root.children:
         compressed_root.children = {
-            token: _compress_from(child, [root])
+            token: _compress_from(child, [compressed_root])
             for token, child in sorted(root.children.items(), key=lambda item: item[0])
         }
     return compressed_root
@@ -335,7 +335,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
                 packed_value[tree_start:tree_end] = packable_value[cursor:cursor + length]
                 cursor += length
             packed_tree[packable_key] = packed_value
-        
+        packed_trees.append(packed_tree)
     return roots, num_tree_tokens_list, packed_trees
 
 def amend_packed_tree_position_ids(input_: dict[str, Any]) -> torch.Tensor:
