@@ -71,7 +71,6 @@ from areal.utils.tree_training import (
     patch_bridge_for_tree_training, 
     model_with_tree_attention_forward,
     amend_packed_tree_position_ids,
-    recover_packed_tensor_list,
     get_seq_lens,
 )
 class _MegatronModelList(list):
