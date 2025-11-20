@@ -300,8 +300,6 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
 
         input_ids: list[int] = torch.empty((num_tree_tokens,), dtype=input_template.dtype, device=input_template.device)
         for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
-            print(f"tree_start: tree_end = {tree_start}: {tree_end}")
-            print(f"seq = {sequences[seq_id][seq_start:seq_start + (tree_end - tree_start + 1)]}")
             input_ids[tree_start:tree_end + 1] = torch.tensor(
                 sequences[seq_id][seq_start:seq_start + (tree_end - tree_start + 1)], 
                 dtype=input_template.dtype, 
