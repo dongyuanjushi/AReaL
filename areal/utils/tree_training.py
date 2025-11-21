@@ -458,7 +458,7 @@ def packed_tree_gather_logprobs(
             flattened_logprobs[cursor : cursor + seq_len] = seq_logprobs
             flattened_entropies[cursor : cursor + seq_len] = seq_entropies
         else:
-            seq_logprobs = gather_logprobs(tree_logits, tree_tokens, temperature)
+            seq_logprobs = gather_logprobs(tree_logits, labels, temperature)
             flattened_logprobs[cursor : cursor + seq_len] = seq_logprobs
         cursor += seq_len
 
