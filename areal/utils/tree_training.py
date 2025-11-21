@@ -448,11 +448,12 @@ def packed_tree_gather_logprobs(
             tree_token_segments.append(input_ids[start:end+1])
             tree_logits_segments.append(logits[start:end+1])
         tree_tokens = torch.cat(tree_token_segments, dim=0)
+        labels = torch.roll(tree_tokens, shifts=-1, dims=-1)
         tree_logits = torch.cat(tree_logits_segments, dim=0)
 
         if calculate_entropy:
             seq_logprobs, seq_entropies = gather_logprobs_entropy(
-                tree_logits, tree_tokens, temperature
+                tree_logits, labels, temperature
             )
             flattened_logprobs[cursor : cursor + seq_len] = seq_logprobs
             flattened_entropies[cursor : cursor + seq_len] = seq_entropies
