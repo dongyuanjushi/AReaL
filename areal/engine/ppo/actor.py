@@ -79,7 +79,6 @@ class PPOActor:
     def compute_logp(
         self,
         data: dict[str, Any],
-        temperature: float | None = None,
     ) -> torch.Tensor:
         def calc_logprobs(logits, input_data):
             if self.enable_tree_training:
@@ -87,14 +86,14 @@ class PPOActor:
                 sequence_ids = input_data["sequence_ids"]
                 seq_id_to_tree_indices = input_data["seq_id_to_tree_indices"]
                 logprobs = packed_tree_gather_logprobs(
-                    logits, input_ids, sequence_ids, seq_id_to_tree_indices, temperature or 1.0
+                    logits, input_ids, sequence_ids, seq_id_to_tree_indices, self.temperature
                 )
             else:
                 labels = input_data.get(
                     "rolled_input_ids",
                     torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
                 )
-                logprobs = gather_logprobs(logits, labels, temperature or 1.0)
+                logprobs = gather_logprobs(logits, labels, self.temperature)
             return logprobs
 
         self.engine.eval()
