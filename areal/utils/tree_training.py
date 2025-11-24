@@ -593,6 +593,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         key = key.transpose(1, 2).contiguous()
         value = value.transpose(1, 2).contiguous()
         
+        print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}")
         output = F.scaled_dot_product_attention(
             query,
             key,
