@@ -599,7 +599,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         query = query.permute(1, 2, 0, 3).contiguous()
         key = key.permute(1, 2, 0, 3).contiguous()
         value = value.permute(1, 2, 0, 3).contiguous()
-        enable_gqa = query.shape[2] != key.shape[2]
+        enable_gqa = query.shape[1] != key.shape[1]
 
         print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
         from torch.backends.cuda import can_use_efficient_attention
