@@ -532,6 +532,7 @@ TREE_ATTENTION_BACKEND_TYPE = os.environ.get("TREE_ATTENTION_BACKEND_TYPE", "pyt
 
 if TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
     # compile flex attention to save GPU memory
+    logger.info("Compiled torch flex attention.")
     flex_attention = torch.compile(flex_attention, mode="max-autotune")
     create_block_mask = torch.compile(create_block_mask)
 
