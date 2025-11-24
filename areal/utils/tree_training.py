@@ -607,7 +607,9 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         )
 
         # output shape: [B, H, S, D] -> [S, B, H, D]
+        print(f"[Debug] before permute output shape: {output.shape}")
         output = output.permute(2, 0, 1, 3).contiguous()
+        print(f"[Debug] after permute output shape: {output.shape}")
         return output
 
 # Copied from megatron core to support arbitrary attention mask for tree training.
