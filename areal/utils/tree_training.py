@@ -525,6 +525,7 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.backends.cuda import can_use_efficient_attention
 from torch.backends.cuda import SDPAParams
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 
 TREE_ATTENTION_BACKEND_TYPE = os.environ.get("TREE_ATTENTION_BACKEND_TYPE", "pytorch_xformer")
@@ -587,15 +588,6 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 "PytorchScaledDotProductAttention does not support packed sequences yet."
             )
         
-        # attention mask for Megatron TE Attention set True for positions to be masked.
-        # shape should be [1, S, S]
-        attention_mask = attention_mask.bool().squeeze(0)
-        # For xformer backend, the attention mask is attention bias, which is -inf where mask is True.
-        # In other positions, it is 0.
-        # Data type should be identical to query/key/value tensors.
-        attention_bias = torch.zeros_like(attention_mask, dtype=query.dtype)
-        attention_bias = attention_bias.masked_fill(attention_mask, float('-inf'))
-
         # query, key, value shape: [S, B, H, D] -> [B, H, S, D]
         query = query.permute(1, 2, 0, 3).contiguous()
         key = key.permute(1, 2, 0, 3).contiguous()
@@ -603,32 +595,66 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         enable_gqa = query.shape[1] != key.shape[1]
 
         # GQA on xformer backend attention requires key and value heads be expanded to match query heads.
-        if enable_gqa:
-            key = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
-            value = value.repeat_interleave(query.shape[1] // value.shape[1], dim=1)
+        if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
+            # attention mask for Megatron TE Attention set True for positions to be masked.
+            # shape should be [1, S, S]
+            attention_mask = attention_mask.bool().squeeze(0)
+            # For xformer backend, the attention mask is attention bias, which is -inf where mask is True.
+            # In other positions, it is 0.
+            # Data type should be identical to query/key/value tensors.
+            attention_bias = torch.zeros_like(attention_mask, dtype=query.dtype)
+            attention_bias = attention_bias.masked_fill(attention_mask, float('-inf'))
+            
+            if enable_gqa:
+                key = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
+                value = value.repeat_interleave(query.shape[1] // value.shape[1], dim=1)
 
-        
-        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-            params = SDPAParams(
+            
+            with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+                params = SDPAParams(
+                    query,
+                    key,
+                    value,
+                    attention_bias,
+                    self.attention_dropout if self.attention_dropout else 0.0,
+                    False, 
+                    enable_gqa,
+                )
+                if not can_use_efficient_attention(params, debug=True):
+                    raise RuntimeError("Efficient attention is not available on this CUDA backend.")
+
+                output = F.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attention_bias,
+                    dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
+                    scale=self.softmax_scale,
+                    enable_gqa=enable_gqa,
+                )
+        elif TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
+            attention_mask = attention_mask.bool().squeeze(0).squeeze(0) # shape: [S, S]
+            q_len = attention_mask.shape[0]
+
+            def arbitrary_mask(
+                batch: torch.Tensor,
+                head: torch.Tensor,
+                q_idx: torch.Tensor,
+                k_idx: torch.Tensor,
+            ):
+                return attention_mask[q_idx, k_idx]
+            block_mask = create_block_mask(arbitrary_mask, None, None, q_len, q_len)
+            output = flex_attention(
                 query,
                 key,
                 value,
-                attention_bias,
-                self.attention_dropout if self.attention_dropout else 0.0,
-                False, 
-                enable_gqa,
-            )
-            if not can_use_efficient_attention(params, debug=True):
-                raise RuntimeError("Efficient attention is not available on this CUDA backend.")
-
-            output = F.scaled_dot_product_attention(
-                query,
-                key,
-                value,
-                attn_mask=attention_bias,
-                dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
-                scale=self.softmax_scale,
+                block_mask,
+                softmax_scale=self.softmax_scale,
                 enable_gqa=enable_gqa,
+            )
+        else:
+            raise NotImplementedError(
+                f"Unsupported TREE_ATTENTION_BACKEND_TYPE: {TREE_ATTENTION_BACKEND_TYPE}"
             )
 
         # output shape: [B, H, S, D] -> [S, B, H, D] -> [S, B, H*D]
@@ -686,7 +712,7 @@ def get_gpt_layer_with_tree_attention(
 
     if multi_latent_attention:
         raise RuntimeError("Tree attention for multi-latent attention is not supported yet.")
-    if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
+    if TREE_ATTENTION_BACKEND_TYPE in ["pytorch_xformer", "pytorch_flex"]:
         core_attention_class = PytorchScaledDotProductAttention
     elif TREE_ATTENTION_BACKEND_TYPE == "te":
         core_attention_class = backend.core_attention()
