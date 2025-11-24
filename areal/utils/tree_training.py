@@ -595,11 +595,10 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         attention_bias = attention_bias.masked_fill(attention_mask, float('-inf'))
 
         print(f"[Debug] before transpose: query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}")
-        # query, key, value shape: [S, B, H, D] -> [B, S, H, D]
-        query = query.transpose(0, 1).contiguous()
-        key = key.transpose(0, 1).contiguous()
-        value = value.transpose(0, 1).contiguous()
-        
+        # query, key, value shape: [S, B, H, D] -> [B, H, S, D]
+        query = query.permute(1, 2, 0, 3).contiguous()
+        key = key.permute(1, 2, 0, 3).contiguous()
+        value = value.permute(1, 2, 0, 3).contiguous()
         enable_gqa = query.shape[2] != key.shape[2]
 
         print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
