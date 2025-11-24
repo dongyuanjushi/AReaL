@@ -593,12 +593,25 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         attention_mask = attention_mask.to(dtype=query.dtype) * float('-inf')
 
         print(f"[Debug] before transpose: query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}")
-        # query, key, value shape: [S, B, H, D] -> [B, H, S, D]
-        query = query.permute(1, 2, 0, 3).contiguous()
-        key = key.permute(1, 2, 0, 3).contiguous()
-        value = value.permute(1, 2, 0, 3).contiguous()
+        # query, key, value shape: [S, B, H, D] -> [B, S, H, D]
+        query = query.transpose(0, 1).contiguous()
+        key = key.transpose(0, 1).contiguous()
+        value = value.transpose(0, 1).contiguous()
         
-        enable_gqa = query.shape[1] != key.shape[1]
+        enable_gqa = query.shape[2] != key.shape[2]
+        # For xformers, we need to expand for GQA by ourselves.
+        n_q_heads = query.shape[2]
+        n_kv_heads = key.shape[2]
+        if enable_gqa:
+            if n_q_heads % n_kv_heads != 0:
+                raise ValueError(
+                    f"Number of query heads {n_q_heads} is not divisible by number of key/value heads {n_kv_heads} for GQA."
+                )
+            expand_factor = n_q_heads // n_kv_heads
+            query = query.reshape(query.shape[0], query.shape[1], n_kv_heads, expand_factor, query.shape[3])
+            key = key.reshape(key.shape[0], key.shape[1], n_kv_heads, 1, key.shape[3]).expand(-1, -1, -1, expand_factor, -1)
+            value = value.reshape(value.shape[0], value.shape[1], n_kv_heads, 1, value.shape[3]).expand(-1, -1, -1, expand_factor, -1)
+
         print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
         with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
             output = F.scaled_dot_product_attention(
@@ -608,7 +621,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 attn_mask=attention_mask,
                 dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
                 scale=self.softmax_scale,
-                enable_gqa=enable_gqa,
+                enable_gqa=False,
             )
 
         # output shape: [B, H, S, D] -> [S, B, H, D] -> [S, B, H*D]
