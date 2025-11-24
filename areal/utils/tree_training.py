@@ -551,7 +551,10 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
         self.softmax_scale = softmax_scale
-        logger.info("Using PytorchScaledDotProductAttention for tree training attention.")
+        logger.info(
+            f"Using PytorchScaledDotProductAttention for tree training attention, "
+            f"backend: {TREE_ATTENTION_BACKEND_TYPE}"
+        )
 
         # PytorchScaledDotProductAttention does not support context parallel
         if config.context_parallel_size != 1:
