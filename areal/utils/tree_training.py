@@ -546,6 +546,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.attention_dropout = attention_dropout
         self.softmax_scale = softmax_scale
+        logger.info("Using PytorchScaledDotProductAttention for tree training attention.")
 
         # PytorchScaledDotProductAttention does not support context parallel
         if config.context_parallel_size != 1:
@@ -715,7 +716,6 @@ def get_tree_gpt_decoder_block_spec(
         moe_use_legacy_grouped_gemm=config.moe_use_legacy_grouped_gemm,
         qk_l2_norm=qk_l2_norm,
         use_kitchen=config.use_kitchen,
-        backend_type=
     )
     # Following contents are copied from get_gpt_decoder_block_spec from megatron
     moe_layer_spec = get_gpt_layer_with_tree_attention(
