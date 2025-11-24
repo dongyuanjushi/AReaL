@@ -712,12 +712,12 @@ def _get_transformer_layer_spec_with_tree_attention(self, vp_stage: int | None =
         self.config.normalization == "RMSNorm"
     ), "only RMSNorm is supported for now"
     # check if get_gpt_decoder_block_spec has vp_stage parameter
-    sig = inspect.signature(get_gpt_decoder_block_spec)
+    sig = inspect.signature(get_te_tree_gpt_decoder_block_spec)
     self.has_vp_stage = "vp_stage" in sig.parameters  # for mcore 0.12 compatibility
     extra_args = {}
     if self.has_vp_stage:
         extra_args["vp_stage"] = vp_stage
-    transformer_layer_spec = get_gpt_decoder_block_spec(
+    transformer_layer_spec = get_te_tree_gpt_decoder_block_spec(
         self.config, use_transformer_engine=True, **extra_args
     )
     return transformer_layer_spec
