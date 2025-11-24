@@ -634,7 +634,6 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 )
         elif TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
             attention_mask = attention_mask.bool().squeeze(0).squeeze(0) # shape: [S, S]
-            attention_mask_py_list = attention_mask.tolist()
             q_len = attention_mask.shape[0]
 
             def arbitrary_mask(
@@ -643,7 +642,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 q_idx: torch.Tensor,
                 k_idx: torch.Tensor,
             ):
-                return attention_mask_py_list[q_idx][k_idx]
+                return attention_mask[q_idx, k_idx]
             block_mask = create_block_mask(arbitrary_mask, None, None, q_len, q_len, device=query.device)
             output = flex_attention(
                 query,
