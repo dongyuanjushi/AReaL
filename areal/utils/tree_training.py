@@ -718,7 +718,7 @@ def _get_transformer_layer_spec_with_tree_attention(self, vp_stage: int | None =
     if self.has_vp_stage:
         extra_args["vp_stage"] = vp_stage
     transformer_layer_spec = get_te_tree_gpt_decoder_block_spec(
-        self.config, use_transformer_engine=True, **extra_args
+        self.config, **extra_args
     )
     return transformer_layer_spec
 
