@@ -591,9 +591,8 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         # For xformer backend, the attention mask is attention bias, which is -inf where mask is True.
         # In other positions, it is 0.
         # Data type should be identical to query/key/value tensors.
-        attention_mask = attention_mask.to(dtype=query.dtype)
-        attention_mask = attention_mask.masked_fill(~attention_mask, 0.0)
-        attention_mask = attention_mask.masked_fill(attention_mask, float('-inf'))
+        attention_bias = torch.zeros_like(attention_mask, dtype=query.dtype)
+        attention_bias = attention_bias.masked_fill(attention_mask, float('-inf'))
 
         print(f"[Debug] before transpose: query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}")
         # query, key, value shape: [S, B, H, D] -> [B, S, H, D]
@@ -625,7 +624,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 query=query,
                 key=key,
                 value=value,
-                attn_mask=attention_mask,
+                attn_mask=attention_bias,
                 dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
                 is_causal=False, 
                 enable_gqa=False,
@@ -639,7 +638,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 query,
                 key,
                 value,
-                attn_mask=attention_mask,
+                attn_mask=attention_bias,
                 dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
                 scale=self.softmax_scale,
                 enable_gqa=False,
