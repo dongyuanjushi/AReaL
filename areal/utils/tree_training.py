@@ -593,7 +593,8 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         key = key.transpose(1, 2).contiguous()
         value = value.transpose(1, 2).contiguous()
         
-        print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}")
+        enable_gqa = query.shape[1] != key.shape[1]
+        print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
         output = F.scaled_dot_product_attention(
             query,
             key,
@@ -601,6 +602,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             attn_mask=attention_mask,
             dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
             scale=self.softmax_scale,
+            enable_gqa=enable_gqa,
         )
 
         # output shape: [B, H, S, D] -> [B, S, H, D]
