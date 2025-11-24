@@ -569,9 +569,9 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         attention_bias: torch.Tensor = None,
         packed_seq_params: PackedSeqParams = None,
     ):
-        # query: [B, S, H, D] in which B should be 1 in current tree training implementation
-        # key: [B, S, H, D]
-        # value: [B, S, H, D]
+        # query: [S, B, H, D] in which B should be 1 in current tree training implementation
+        # key: [S, B, H, D]
+        # value: [S, B, H, D]
         # attention_mask: [1, 1, S, S]
         # attention_mask_type: arbitrary
 
@@ -589,10 +589,10 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         attention_mask = ~attention_mask.bool().squeeze(0)
         
         print(f"[Debug] before transpose: query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}")
-        # query, key, value shape: [B, S, H, D] -> [B, H, S, D]
-        query = query.transpose(1, 2).contiguous()
-        key = key.transpose(1, 2).contiguous()
-        value = value.transpose(1, 2).contiguous()
+        # query, key, value shape: [S, B, H, D] -> [B, H, S, D]
+        query = query.permute(1, 2, 0, 3).contiguous()
+        key = key.permute(1, 2, 0, 3).contiguous()
+        value = value.permute(1, 2, 0, 3).contiguous()
         
         enable_gqa = query.shape[1] != key.shape[1]
         print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
@@ -606,8 +606,8 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             enable_gqa=enable_gqa,
         )
 
-        # output shape: [B, H, S, D] -> [B, S, H, D]
-        output = output.transpose(1, 2).contiguous()
+        # output shape: [B, H, S, D] -> [S, B, H, D]
+        output = output.permute(2, 0, 1, 3).contiguous()
         return output
 
 # Copied from megatron core to support arbitrary attention mask for tree training.
