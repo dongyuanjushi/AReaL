@@ -613,7 +613,25 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             value = value.reshape(value.shape[0], value.shape[1], n_kv_heads, 1, value.shape[3]).expand(-1, -1, -1, expand_factor, -1)
 
         print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
+        from torch.backends.cuda import can_use_efficient_attention
+        from torch.backends.cuda import SDPAParams
+        
+
         with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+            params = SDPAParams(
+                query=query,
+                key=key,
+                value=value,
+                attn_mask=attention_mask,
+                dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
+                is_causal=False, 
+                enable_gqa=False,
+            )
+            if not can_use_efficient_attention(params, debug=True):
+                raise RuntimeError("Efficient attention is not available on this CUDA backend.")
+            else:
+                print("[Debug] Using efficient attention backend.")
+
             output = F.scaled_dot_product_attention(
                 query,
                 key,
