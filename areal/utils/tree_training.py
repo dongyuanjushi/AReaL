@@ -1,3 +1,4 @@
+import os
 from typing import Any
 from collections import defaultdict
 
@@ -471,8 +472,7 @@ def packed_tree_gather_logprobs(
         return flattened_logprobs, flattened_entropies
     else:
         return flattened_logprobs
-
-
+    
 ############################## Model Initialization ##############################
 
 import inspect
@@ -509,6 +509,7 @@ from megatron.core.transformer.transformer_layer import (
     get_transformer_layer_offset,
 )
 from megatron.core.models.gpt.gpt_layer_specs import get_mlp_module_spec_for_backend
+from megatron.core.packed_seq_params import PackedSeqParams
 
 try:
     import transformer_engine as te  # pylint: disable=unused-import
@@ -520,8 +521,91 @@ try:
 except ImportError:
     HAVE_TE = False
 
+import torch.nn.functional as F
+
+
+TREE_ATTENTION_BACKEND_TYPE = os.environ.get("TREE_ATTENTION_BACKEND_TYPE", "pytorch_xformer")
+
+class PytorchScaledDotProductAttention(torch.nn.Module):
+    """ Pytorch implementation of scaled dot product attention 
+    with xformer backend that supports arbitrary attention mask type
+    """
+    def __init__(
+        self,
+        config: TransformerConfig,
+        layer_number: int,
+        attn_mask_type: AttnMaskType,
+        attention_type: str,
+        attention_dropout: float | None = None,
+        softmax_scale: float | None = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.layer_number = layer_number
+        self.attn_mask_type = attn_mask_type
+        self.attention_type = attention_type
+        self.attention_dropout = attention_dropout
+        self.softmax_scale = softmax_scale
+
+        # PytorchScaledDotProductAttention does not support context parallel
+        if config.context_parallel_size != 1:
+            raise ValueError("PytorchScaledDotProductAttention does not support context parallelism.")
+
+        if attention_type != "self":
+            raise ValueError("PytorchScaledDotProductAttention only supports self-attention.")
+        
+        if attn_mask_type != AttnMaskType.arbitrary:
+            raise ValueError("PytorchScaledDotProductAttention only supports arbitrary attention mask type.")
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: torch.Tensor,
+        attn_mask_type: AttnMaskType,
+        attention_bias: torch.Tensor = None,
+        packed_seq_params: PackedSeqParams = None,
+    ):
+        # query: [B, S, H, D] in which B should be 1 in current tree training implementation
+        # key: [B, S, H, D]
+        # value: [B, S, H, D]
+        # attention_mask: [1, 1, S, S]
+        # attention_mask_type: arbitrary
+
+        if attention_bias is not None:
+            raise NotImplementedError(
+                "PytorchScaledDotProductAttention does not support attention_bias yet."
+            )
+        if packed_seq_params is not None:
+            raise NotImplementedError(
+                "PytorchScaledDotProductAttention does not support packed sequences yet."
+            )
+        
+        # attention mask is inversed from Megatron TE attention
+        # shape should be [1, S, S]
+        attention_mask = ~attention_mask.bool().squeeze(0)
+        
+        # query, key, value shape: [B, S, H, D] -> [B, H, S, D]
+        query = query.transpose(1, 2).contiguous()
+        key = key.transpose(1, 2).contiguous()
+        value = value.transpose(1, 2).contiguous()
+        
+        output = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=attention_mask,
+            dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
+            scale=self.softmax_scale,
+        )
+
+        # output shape: [B, H, S, D] -> [B, S, H, D]
+        output = output.transpose(1, 2).contiguous()
+        return output
+
 # Copied from megatron core to support arbitrary attention mask for tree training.
-def get_gpt_layer_with_tree_attention_transformer_engine_spec(
+def get_gpt_layer_with_tree_attention(
     num_experts: int | None = None,
     moe_grouped_gemm: bool | None = False,
     qk_layernorm: bool | None = False,
@@ -571,6 +655,11 @@ def get_gpt_layer_with_tree_attention_transformer_engine_spec(
 
     if multi_latent_attention:
         raise RuntimeError("Tree attention for multi-latent attention is not supported yet.")
+    if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
+        core_attention_class = PytorchScaledDotProductAttention
+    elif TREE_ATTENTION_BACKEND_TYPE == "te":
+        core_attention_class = backend.core_attention()
+
     qk_norm = backend.layer_norm(for_qk=True)
     return ModuleSpec(
         module=TransformerLayer,
@@ -580,7 +669,7 @@ def get_gpt_layer_with_tree_attention_transformer_engine_spec(
                 params={"attn_mask_type": AttnMaskType.arbitrary},
                 submodules=SelfAttentionSubmodules(
                     linear_qkv=backend.column_parallel_layer_norm_linear(),
-                    core_attention=backend.core_attention(),
+                    core_attention=core_attention_class,
                     linear_proj=backend.row_parallel_linear(),
                     q_layernorm=(
                         L2Norm if qk_l2_norm else (qk_norm if qk_layernorm else IdentityOp)
@@ -607,7 +696,7 @@ def get_gpt_layer_with_tree_attention_transformer_engine_spec(
 
 
 # Copied from megatron core to support arbitrary attention mask for tree training.
-def get_te_tree_gpt_decoder_block_spec(
+def get_tree_gpt_decoder_block_spec(
     config: TransformerConfig,
     normalization: str | None = None,
     qk_l2_norm: bool | None = False,
@@ -618,7 +707,7 @@ def get_te_tree_gpt_decoder_block_spec(
             "Currently tree attention is only supported with Transformer Engine backend, which is not installed"
         )
     layer_norm_impl = TENorm
-    dense_layer_spec = get_gpt_layer_with_tree_attention_transformer_engine_spec(
+    dense_layer_spec = get_gpt_layer_with_tree_attention(
         num_experts=None,
         moe_grouped_gemm=False,
         qk_layernorm=config.qk_layernorm,
@@ -626,9 +715,10 @@ def get_te_tree_gpt_decoder_block_spec(
         moe_use_legacy_grouped_gemm=config.moe_use_legacy_grouped_gemm,
         qk_l2_norm=qk_l2_norm,
         use_kitchen=config.use_kitchen,
+        backend_type=
     )
     # Following contents are copied from get_gpt_decoder_block_spec from megatron
-    moe_layer_spec = get_gpt_layer_with_tree_attention_transformer_engine_spec(
+    moe_layer_spec = get_gpt_layer_with_tree_attention(
         num_experts=config.num_moe_experts,
         moe_grouped_gemm=config.moe_grouped_gemm,
         qk_layernorm=config.qk_layernorm,
@@ -712,12 +802,12 @@ def _get_transformer_layer_spec_with_tree_attention(self, vp_stage: int | None =
         self.config.normalization == "RMSNorm"
     ), "only RMSNorm is supported for now"
     # check if get_gpt_decoder_block_spec has vp_stage parameter
-    sig = inspect.signature(get_te_tree_gpt_decoder_block_spec)
+    sig = inspect.signature(get_tree_gpt_decoder_block_spec)
     self.has_vp_stage = "vp_stage" in sig.parameters  # for mcore 0.12 compatibility
     extra_args = {}
     if self.has_vp_stage:
         extra_args["vp_stage"] = vp_stage
-    transformer_layer_spec = get_te_tree_gpt_decoder_block_spec(
+    transformer_layer_spec = get_tree_gpt_decoder_block_spec(
         self.config, **extra_args
     )
     return transformer_layer_spec
@@ -726,7 +816,6 @@ def patch_bridge_for_tree_training():
     """ Patch LLMBridge to support tree training with arbitrary attention mask.
     """
     LLMBridge._get_transformer_layer_spec = _get_transformer_layer_spec_with_tree_attention
-
 
 ############################## Model Forward ##############################
 
