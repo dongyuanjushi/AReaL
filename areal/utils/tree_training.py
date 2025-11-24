@@ -601,6 +601,11 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         value = value.permute(1, 2, 0, 3).contiguous()
         enable_gqa = query.shape[1] != key.shape[1]
 
+        # GQA on xformer backend attention requires key and value heads be expanded to match query heads.
+        if enable_gqa:
+            key = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
+            value = value.repeat_interleave(query.shape[1] // value.shape[1], dim=1)
+
         print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
         from torch.backends.cuda import can_use_efficient_attention
         from torch.backends.cuda import SDPAParams
