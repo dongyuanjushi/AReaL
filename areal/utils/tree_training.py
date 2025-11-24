@@ -606,9 +606,9 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             enable_gqa=enable_gqa,
         )
 
-        # output shape: [B, H, S, D] -> [S, B, H, D]
+        # output shape: [B, H, S, D] -> [S, B, H, D] -> [S, B, H*D]
         print(f"[Debug] before permute output shape: {output.shape}")
-        output = output.transpose(1, 2).contiguous()
+        output = output.permute(2, 0, 1, 3).contiguous().view(output.shape[2], output.shape[0], -1)
         print(f"[Debug] after permute output shape: {output.shape}")
         return output
 
