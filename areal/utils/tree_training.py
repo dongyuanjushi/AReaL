@@ -538,6 +538,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         attention_type: str,
         attention_dropout: float | None = None,
         softmax_scale: float | None = None,
+        **kwargs
     ):
         super().__init__()
         self.config = config
