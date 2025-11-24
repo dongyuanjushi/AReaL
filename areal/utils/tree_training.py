@@ -649,7 +649,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 key,
                 value,
                 block_mask,
-                softmax_scale=self.softmax_scale,
+                scale=self.softmax_scale,
                 enable_gqa=enable_gqa,
             )
         else:
