@@ -526,9 +526,34 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.backends.cuda import can_use_efficient_attention
 from torch.backends.cuda import SDPAParams
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
-
+from functools import lru_cache
 
 TREE_ATTENTION_BACKEND_TYPE = os.environ.get("TREE_ATTENTION_BACKEND_TYPE", "pytorch_xformer")
+
+if TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
+    # compile flex attention to save GPU memory
+    flex_attention = torch.compile(flex_attention, mode="max-autotune")
+    create_block_mask = torch.compile(create_block_mask)
+
+@lru_cache
+def create_block_mask_cached(
+    mask_mod: torch.BoolTensor | None = None, 
+    B: int = 1,
+    H: int = 1,
+    Q_LEN: int = 1,
+    KV_LEN: int = 1,
+    device: torch.device | None = None,
+):
+    return create_block_mask(
+        mask_mod=mask_mod,
+        B=B,
+        H=H,
+        Q_LEN=Q_LEN,
+        KV_LEN=KV_LEN,
+        device=device,
+    )
+
+
 
 class PytorchScaledDotProductAttention(torch.nn.Module):
     """ Pytorch implementation of scaled dot product attention 
@@ -646,7 +671,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 k_idx: torch.Tensor,
             ):
                 return attention_mask[q_idx, k_idx]
-            block_mask = create_block_mask(arbitrary_mask, None, None, q_len, q_len, device=query.device)
+            block_mask = create_block_mask_cached(arbitrary_mask, None, None, q_len, q_len, device=query.device)
             output = flex_attention(
                 query,
                 key,
