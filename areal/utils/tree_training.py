@@ -523,6 +523,8 @@ except ImportError:
 
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.backends.cuda import can_use_efficient_attention
+from torch.backends.cuda import SDPAParams
 
 
 TREE_ATTENTION_BACKEND_TYPE = os.environ.get("TREE_ATTENTION_BACKEND_TYPE", "pytorch_xformer")
@@ -594,7 +596,6 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         attention_bias = torch.zeros_like(attention_mask, dtype=query.dtype)
         attention_bias = attention_bias.masked_fill(attention_mask, float('-inf'))
 
-        print(f"[Debug] before transpose: query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}")
         # query, key, value shape: [S, B, H, D] -> [B, H, S, D]
         query = query.permute(1, 2, 0, 3).contiguous()
         key = key.permute(1, 2, 0, 3).contiguous()
@@ -606,9 +607,6 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             key = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
             value = value.repeat_interleave(query.shape[1] // value.shape[1], dim=1)
 
-        print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
-        from torch.backends.cuda import can_use_efficient_attention
-        from torch.backends.cuda import SDPAParams
         
         with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
             params = SDPAParams(
@@ -622,8 +620,6 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             )
             if not can_use_efficient_attention(params, debug=True):
                 raise RuntimeError("Efficient attention is not available on this CUDA backend.")
-            else:
-                print("[Debug] Using efficient attention backend.")
 
             output = F.scaled_dot_product_attention(
                 query,
@@ -636,9 +632,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             )
 
         # output shape: [B, H, S, D] -> [S, B, H, D] -> [S, B, H*D]
-        print(f"[Debug] before permute output shape: {output.shape}")
         output = output.permute(2, 0, 1, 3).contiguous().view(output.shape[2], output.shape[0], -1)
-        print(f"[Debug] after permute output shape: {output.shape}")
         return output
 
 # Copied from megatron core to support arbitrary attention mask for tree training.
