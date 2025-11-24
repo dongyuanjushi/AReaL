@@ -643,7 +643,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 q_idx: torch.Tensor,
                 k_idx: torch.Tensor,
             ):
-                return attention_mask_py_list[q_idx, k_idx]
+                return attention_mask_py_list[q_idx][k_idx]
             block_mask = create_block_mask(arbitrary_mask, None, None, q_len, q_len, device=query.device)
             output = flex_attention(
                 query,
