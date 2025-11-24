@@ -522,6 +522,7 @@ except ImportError:
     HAVE_TE = False
 
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 
 TREE_ATTENTION_BACKEND_TYPE = os.environ.get("TREE_ATTENTION_BACKEND_TYPE", "pytorch_xformer")
@@ -596,15 +597,16 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         
         enable_gqa = query.shape[1] != key.shape[1]
         print(f"[Debug] attention_mask shape: {attention_mask.shape}, query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}, enable_gqa: {enable_gqa}")
-        output = F.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
-            scale=self.softmax_scale,
-            enable_gqa=enable_gqa,
-        )
+        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+            output = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attention_mask,
+                dropout_p=self.attention_dropout if self.attention_dropout else 0.0,
+                scale=self.softmax_scale,
+                enable_gqa=enable_gqa,
+            )
 
         # output shape: [B, H, S, D] -> [S, B, H, D] -> [S, B, H*D]
         print(f"[Debug] before permute output shape: {output.shape}")
