@@ -588,6 +588,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         # shape should be [1, S, S]
         attention_mask = ~attention_mask.bool().squeeze(0)
         
+        print(f"[Debug] before transpose: query shape: {query.shape}, key shape: {key.shape}, value shape: {value.shape}")
         # query, key, value shape: [B, S, H, D] -> [B, H, S, D]
         query = query.transpose(1, 2).contiguous()
         key = key.transpose(1, 2).contiguous()
