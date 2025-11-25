@@ -412,44 +412,6 @@ def get_seq_lens(
         sequence_lens.append(length)
     return sequence_lens
 
-from areal.utils.functional import _gather_logprobs_entropy, _gather_logprobs
-
-def _gather_sequence_logprobs_from_tree_logits(
-    logits: torch.Tensor,
-    tree_indices_list: list[tuple[int, int]],
-    labels: torch.Tensor,
-    temperature: float = 1.0,
-    chunk_size: int = 1024,
-    return_entropy: bool = False,
-):
-    # TODO: support tensor parallelism
-    batch_size = logits.shape[0]
-    log_probs_labels_list = []
-    entropy_list = []
-
-    for start, end in tree_indices_list:
-        for i in range(start, end + 1, chunk_size):
-            end_idx = min(i + chunk_size, end + 1)
-            chunk_logits = logits[i:end_idx]
-            chunk_labels = labels[i:end_idx]
-
-            if return_entropy:
-                chunk_log_probs, chunk_entropy = _gather_logprobs_entropy(
-                    chunk_logits, chunk_labels, temperature
-                )
-                entropy_list.append(chunk_entropy)
-            else:
-                chunk_log_probs = _gather_logprobs(
-                    chunk_logits, chunk_labels, temperature
-                )
-            log_probs_labels_list.append(chunk_log_probs)
-
-    logprobs = torch.cat(log_probs_labels_list)
-    entropy = None
-    if return_entropy:
-        entropy = torch.cat(entropy_list)
-    return logprobs, entropy
-
 @trace_perf("tree_training.packed_tree_gather_logprobs")
 def packed_tree_gather_logprobs(
     logits: torch.Tensor,
@@ -485,21 +447,20 @@ def packed_tree_gather_logprobs(
         tree_logits_segments = []
         for start, end in tree_indices_list:
             tree_token_segments.append(input_ids[start:end+1])
-            # tree_logits_segments.append(logits[start:end+1])
+            tree_logits_segments.append(logits[start:end+1])
         tree_tokens = torch.cat(tree_token_segments, dim=0)
         labels = torch.roll(tree_tokens, shifts=-1, dims=-1)
-        # tree_logits = torch.cat(tree_logits_segments, dim=0)
+        tree_logits = torch.cat(tree_logits_segments, dim=0)
 
-        seq_logprobs, seq_entropies = _gather_sequence_logprobs_from_tree_logits(
-            logits, 
-            tree_indices_list, 
-            labels, 
-            temperature,
-            return_entropy=calculate_entropy,
-        )
-        flattened_logprobs[cursor : cursor + seq_len] = seq_logprobs
         if calculate_entropy:
+            seq_logprobs, seq_entropies = gather_logprobs_entropy(
+                tree_logits, labels, temperature
+            )
+            flattened_logprobs[cursor : cursor + seq_len] = seq_logprobs
             flattened_entropies[cursor : cursor + seq_len] = seq_entropies
+        else:
+            seq_logprobs = gather_logprobs(tree_logits, labels, temperature)
+            flattened_logprobs[cursor : cursor + seq_len] = seq_logprobs
         cursor += seq_len
 
     if cursor != total_tokens:
