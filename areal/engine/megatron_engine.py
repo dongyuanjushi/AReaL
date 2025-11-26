@@ -50,6 +50,7 @@ from areal.utils.data import (
     unpack_sequence,
     unpad_logits,
 )
+from areal.utils.datapack import flat2d
 from areal.utils.distributed import init_custom_process_group
 from areal.utils.hf_utils import load_hf_tokenizer
 from areal.utils.lock import DistributedLock
