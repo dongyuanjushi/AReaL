@@ -370,6 +370,9 @@ def main(args):
         rollout.resume()
         perf_tracer.save(step=global_step)
 
+        if global_step >= 3:
+            break
+
     stats_logger.close()
     rollout.destroy()
     actor.destroy()

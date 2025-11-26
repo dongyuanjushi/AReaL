@@ -1088,7 +1088,7 @@ class MegatronEngine(TrainEngine):
             return output, functools.partial(_scaled_loss_fn, orig_input)
 
         forward_backward_func = get_forward_backward_func()
-        with trace_scope("megatron_engine.train_batch.forward_backward"):
+        with trace_scope("megatron_engine.train_batch.forward_backward", enable_profiler=True):
             data_iterator = (
                 micro_batch_generator
                 if len(self.model) > 1
