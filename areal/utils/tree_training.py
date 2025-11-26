@@ -673,19 +673,21 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             )
         
         # query, key, value shape: [S, B, H, D] -> [B, H, S, D]
-        query = query.permute(1, 2, 0, 3) # .contiguous()
-        key = key.permute(1, 2, 0, 3) # .contiguous()
-        value = value.permute(1, 2, 0, 3) # .contiguous()
+        query = query.permute(1, 2, 0, 3).contiguous()
+        key = key.permute(1, 2, 0, 3).contiguous()
+        value = value.permute(1, 2, 0, 3).contiguous()
         enable_gqa = query.shape[1] != key.shape[1]
 
         if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
             # GQA on xformer backend attention requires key and value heads be expanded to match query heads.
             if enable_gqa:
-                repeat_factor = query.shape[1] // key.shape[1]
-                # Use expand instead of repeat_interleave to avoid memory allocation
-                # Shape: [B, kv_heads, S, D] -> [B, kv_heads, repeat_factor, S, D] -> [B, q_heads, S, D]
-                key = key.unsqueeze(2).expand(-1, -1, repeat_factor, -1, -1).reshape(key.shape[0], query.shape[1], key.shape[2], key.shape[3])
-                value = value.unsqueeze(2).expand(-1, -1, repeat_factor, -1, -1).reshape(value.shape[0], query.shape[1], value.shape[2], value.shape[3])
+                key = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
+                value = value.repeat_interleave(query.shape[1] // value.shape[1], dim=1)
+                # repeat_factor = query.shape[1] // key.shape[1]
+                # # Use expand instead of repeat_interleave to avoid memory allocation
+                # # Shape: [B, kv_heads, S, D] -> [B, kv_heads, repeat_factor, S, D] -> [B, q_heads, S, D]
+                # key = key.unsqueeze(2).expand(-1, -1, repeat_factor, -1, -1).reshape(key.shape[0], query.shape[1], key.shape[2], key.shape[3])
+                # value = value.unsqueeze(2).expand(-1, -1, repeat_factor, -1, -1).reshape(value.shape[0], query.shape[1], value.shape[2], value.shape[3])
             with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
                 params = SDPAParams(
                     query,
@@ -733,8 +735,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             )
 
         # output shape: [B, H, S, D] -> [S, B, H, D] -> [S, B, H*D]
-        # output = output.permute(2, 0, 1, 3).contiguous().view(output.shape[2], output.shape[0], -1)
-        output = output.permute(2, 0, 1, 3).view(output.shape[2], output.shape[0], -1)
+        output = output.permute(2, 0, 1, 3).contiguous().view(output.shape[2], output.shape[0], -1)
         return output
 
 # Copied from megatron core to support arbitrary attention mask for tree training.
