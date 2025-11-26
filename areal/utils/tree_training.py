@@ -964,9 +964,9 @@ def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]
         # For xformer backend, the attention mask is attention bias of shape [1, S, S],
         # which is -inf where mask is True and zero for other positions.
         # Data type should be identical to query/key/value tensors.
-        attention_mask = attention_mask.bool().unsqueeze(0)
-        attention_bias = torch.zeros_like(attention_mask, dtype=model.module.dtype)
-        attention_bias = attention_bias.masked_fill(attention_mask, float('-inf'))
+        _attention_mask = attention_mask.bool().unsqueeze(0)
+        attention_mask = torch.zeros_like(_attention_mask, dtype=model.module.dtype)
+        attention_mask = attention_mask.masked_fill_(_attention_mask, float('-inf'))
     elif TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
         attention_mask = attention_mask.bool() # shape: [S, S]
     elif TREE_ATTENTION_BACKEND_TYPE == "te":
