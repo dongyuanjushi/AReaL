@@ -369,8 +369,6 @@ def main(args):
         # Resume rollout
         rollout.resume()
         perf_tracer.save(step=global_step)
-        if global_step >= 5:
-            break
 
     stats_logger.close()
     rollout.destroy()
