@@ -679,6 +679,9 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
         enable_gqa = query.shape[1] != key.shape[1]
 
         if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
+            _attention_mask = attention_mask.bool().squeeze(0)
+            attention_mask = torch.zeros_like(_attention_mask, dtype=query.dtype)
+            attention_mask = attention_mask.masked_fill_(_attention_mask, float('-inf'))
             # GQA on xformer backend attention requires key and value heads be expanded to match query heads.
             if enable_gqa:
                 key = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
@@ -693,7 +696,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                     query,
                     key,
                     value,
-                    attention_bias,
+                    attention_mask,
                     self.attention_dropout if self.attention_dropout else 0.0,
                     False, 
                     enable_gqa,
@@ -711,6 +714,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                     enable_gqa=enable_gqa,
                 )
         elif TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
+            attention_mask = attention_mask.bool().squeeze(0).squeeze(0)
             q_len = attention_mask.shape[0]
 
             def arbitrary_mask(
@@ -960,24 +964,25 @@ def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]
     attention_mask = tree_input["attention_mask"]
     position_ids = tree_input["position_ids"]
     
-    if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
-        # attention mask for Megatron TE Attention set True for positions to be masked.
-        # For xformer backend, the attention mask is attention bias of shape [1, S, S],
-        # which is -inf where mask is True and zero for other positions.
-        # Data type should be identical to query/key/value tensors.
-        _attention_mask = attention_mask.bool().unsqueeze(0)
-        attention_mask = torch.zeros_like(_attention_mask, dtype=dtype)
-        attention_mask = attention_mask.masked_fill_(_attention_mask, float('-inf'))
-    elif TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
-        attention_mask = attention_mask.bool() # shape: [S, S]
-    elif TREE_ATTENTION_BACKEND_TYPE == "te":
-        # Transformer Engine expects True where values should be masked out.
-        # The attention mask is of shape [1, 1, S, S].
-        attention_mask = (~attention_mask).unsqueeze(0).unsqueeze(0)
-    else:
-        raise NotImplementedError(
-            f"Unsupported TREE_ATTENTION_BACKEND_TYPE: {TREE_ATTENTION_BACKEND_TYPE}"
-        )
+    # if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
+    #     # attention mask for Megatron TE Attention set True for positions to be masked.
+    #     # For xformer backend, the attention mask is attention bias of shape [1, S, S],
+    #     # which is -inf where mask is True and zero for other positions.
+    #     # Data type should be identical to query/key/value tensors.
+    #     _attention_mask = attention_mask.bool().unsqueeze(0)
+    #     attention_mask = torch.zeros_like(_attention_mask, dtype=dtype)
+    #     attention_mask = attention_mask.masked_fill_(_attention_mask, float('-inf'))
+    # elif TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
+    #     attention_mask = attention_mask.bool() # shape: [S, S]
+    # elif TREE_ATTENTION_BACKEND_TYPE == "te":
+    #     # Transformer Engine expects True where values should be masked out.
+    #     # The attention mask is of shape [1, 1, S, S].
+    #     attention_mask = (~attention_mask).unsqueeze(0).unsqueeze(0)
+    # else:
+    #     raise NotImplementedError(
+    #         f"Unsupported TREE_ATTENTION_BACKEND_TYPE: {TREE_ATTENTION_BACKEND_TYPE}"
+    #     )
+    attention_mask = (~attention_mask).unsqueeze(0).unsqueeze(0)
 
     # Add batch dimension for input_ids and position_ids
     input_ids = input_ids.unsqueeze(0)
