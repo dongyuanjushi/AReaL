@@ -1054,7 +1054,7 @@ class MegatronEngine(TrainEngine):
                 # 3. scale gradients directly, which is ugly.
                 # Try option 2 first for simplicity.
                 orig_input = mb_list.mbs[forward_step_count]
-                output = model_with_tree_attention_forward(model, batch)
+                output = model_with_tree_attention_forward(model, batch, dtype=self.dtype)
                 forward_step_counts[model_vp_stage] += 1
             else:
                 padding_length = mb_list.padding_lengths[forward_step_count]
@@ -1238,7 +1238,7 @@ class MegatronEngine(TrainEngine):
             forward_step_count = forward_step_counts[model_vp_stage]
             if self.enable_tree_training:
                 orig_input = mb_list.mbs[forward_step_count]
-                output = model_with_tree_attention_forward(model, batch)
+                output = model_with_tree_attention_forward(model, batch, dtype=self.dtype)
                 forward_step_counts[model_vp_stage] += 1
             else:
                 padding_length = mb_list.padding_lengths[forward_step_count]

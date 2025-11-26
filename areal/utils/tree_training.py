@@ -952,7 +952,7 @@ def patch_bridge_for_tree_training():
 ############################## Model Forward ##############################
 
 @trace_perf("tree_training.model_with_tree_attention_forward")
-def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]):
+def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor], dtype=torch.bfloat16):
     """ Patch LLMBridge.model_forward to support tree training with arbitrary attention mask.
     """
     input_ids = tree_input["input_ids"]
@@ -965,7 +965,7 @@ def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]
         # which is -inf where mask is True and zero for other positions.
         # Data type should be identical to query/key/value tensors.
         _attention_mask = attention_mask.bool().unsqueeze(0)
-        attention_mask = torch.zeros_like(_attention_mask, dtype=model.module.dtype)
+        attention_mask = torch.zeros_like(_attention_mask, dtype=dtype)
         attention_mask = attention_mask.masked_fill_(_attention_mask, float('-inf'))
     elif TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
         attention_mask = attention_mask.bool() # shape: [S, S]
