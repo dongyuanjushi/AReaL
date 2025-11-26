@@ -85,6 +85,7 @@ class ProxyRLVRWorkflow(RolloutWorkflow):
         process_pool_executor: ProcessPoolExecutor = None,
         dump_dir: str | None = None,
         rollout_stat_scope: str = "rollout",
+        export_style: str = "individual",
     ):
         self.proxy_server = proxy_server
         self.api_version = "v1"
@@ -94,6 +95,7 @@ class ProxyRLVRWorkflow(RolloutWorkflow):
         self.gconfig = gconfig
         self.run_agent_return_reward = run_agent_return_reward
         self.dump_dir = dump_dir
+        self.export_style = export_style
 
     async def arun_episode(self, engine: InferenceEngine, data):
         futures = [
@@ -118,7 +120,9 @@ class ProxyRLVRWorkflow(RolloutWorkflow):
         for reward in rewards:
             stats_tracker.get(self.rollout_stat_scope).scalar(reward=reward)
 
-        completions = await self.proxy_server.get_completions(session_ids=session_ids)
+        completions = await self.proxy_server.get_completions(
+            session_ids=session_ids, style=self.export_style, discount=0.9
+        )
 
         if self.dump_dir is not None:
             for session_id, completion in completions.items():
@@ -150,7 +154,7 @@ class ProxyAgentConfig(GRPOConfig):
     )
 
     agent_process_pool_size: int = field(
-        default=128,
+        default=256,
         metadata={"help": "Number of parallel processes for running agents."},
     )
 
@@ -159,10 +163,14 @@ class ProxyAgentConfig(GRPOConfig):
         metadata={"help": "Module path for the agent definition."},
     )
 
+    export_style: str = field(
+        default="concat",
+        metadata={"help": "Export style for the proxy server."},
+    )
+
 
 def main(args):
     config, _ = load_expr_config(args, ProxyAgentConfig)
-    config: ProxyAgentConfig
 
     rank = int(os.getenv("RANK"))
     tokenizer = load_hf_tokenizer(config.tokenizer_path)
@@ -222,13 +230,11 @@ def main(args):
         ref.initialize(None, ft_spec)
 
     # Create rollout workflow
-    if tokenizer.pad_token_id not in config.gconfig.stop_token_ids:
-        config.gconfig.stop_token_ids.append(tokenizer.pad_token_id)
-    if tokenizer.eos_token_id not in config.gconfig.stop_token_ids:
-        config.gconfig.stop_token_ids.append(tokenizer.eos_token_id)
-
     client = ArealOpenAI(
-        engine=rollout, tokenizer=tokenizer, tool_call_parser=config.tool_call_parser
+        engine=rollout,
+        tokenizer=tokenizer,
+        tool_call_parser=config.tool_call_parser,
+        chat_template_type="concat" if config.export_style == "concat" else "hf",
     )
 
     free_port = find_free_ports(1)[0]
@@ -240,7 +246,7 @@ def main(args):
         all_addresses, proxy_server.public_addr, group=actor.data_parallel_group
     )
     logger.info(f"Found {len(all_addresses)} proxy servers: {all_addresses}")
-    dist.barrier(device_ids=[actor.device.index])
+    dist.barrier(group=actor.cpu_group)
 
     process_pool_executor = ProcessPoolExecutor(
         max_workers=config.agent_process_pool_size
@@ -259,6 +265,7 @@ def main(args):
         dump_dir=os.path.join(
             StatsLogger.get_log_path(config.stats_logger), "generated"
         ),
+        export_style=config.export_style,
     )
     eval_workflow = RLVRWorkflow(
         reward_fn=gsm8k_reward_fn,
@@ -361,8 +368,8 @@ def main(args):
                 tokenizer=tokenizer,
             )
 
-        dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
+        dist.barrier(group=actor.cpu_group)
 
         with stats_tracker.record_timing("eval"):
 
@@ -374,8 +381,8 @@ def main(args):
                             eval_rollout.submit(item, eval_workflow)
                             cnt += 1
                     eval_rollout.wait(cnt, timeout=None)
-                dist.barrier(device_ids=[actor.device.index])
                 current_platform.synchronize()
+                dist.barrier(group=actor.cpu_group)
 
             evaluator.evaluate(
                 evaluate_fn,
@@ -384,15 +391,15 @@ def main(args):
                 global_step,
             )
 
-        dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
+        dist.barrier(group=actor.cpu_group)
 
         # Upload statistics to the logger (e.g., wandb)
         stats = stats_tracker.export_all(reduce_group=actor.data_parallel_group)
         stats_logger.commit(epoch, step, global_step, stats)
 
-        dist.barrier(device_ids=[actor.device.index])
         current_platform.synchronize()
+        dist.barrier(group=actor.cpu_group)
 
         # Resume rollout
         rollout.resume()

@@ -7,6 +7,8 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ProcessPoolExecutor
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from threading import Lock
 from typing import Any, Protocol
@@ -18,7 +20,7 @@ import uvloop
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from areal.api.cli_args import InferenceEngineConfig
-from areal.api.engine_api import NoResult
+from areal.api.engine_api import InferenceEngine
 from areal.api.io_struct import (
     HttpGenerationResult,
     HttpRequest,
@@ -40,6 +42,8 @@ from areal.utils.perf_tracer import trace_perf
 from .workflow_executor import WorkflowExecutor
 
 RID_CACHE_SIZE = 128
+
+_session_storage = ContextVar("aiohttp.ClientSession")
 
 
 class RemoteInfBackendProtocol(Protocol):
@@ -193,6 +197,41 @@ class RemoteInfBackendProtocol(Protocol):
         """
         ...
 
+    def get_offload_request(self) -> HttpRequest:
+        """Get request to offload model memory.
+
+        Returns
+        -------
+        HttpRequest
+            The HTTP request to offload model memory
+
+        Raises
+        ------
+        NotImplementedError
+            If offload is not supported by this backend
+        """
+        ...
+
+    def get_onload_request(self, tags: list[str] | None = None) -> HttpRequest:
+        """Get request to onload model memory.
+
+        Parameters
+        ----------
+        tags : list[str], optional
+            Tags to onload specific components. If None, onloads all components.
+
+        Returns
+        -------
+        HttpRequest
+            The HTTP request to onload model memory
+
+        Raises
+        ------
+        NotImplementedError
+            If onload is not supported by this backend
+        """
+        ...
+
     def launch_server(self, server_args: dict[str, Any]) -> subprocess.Popen:
         """Launch inference server subprocess.
 
@@ -209,7 +248,7 @@ class RemoteInfBackendProtocol(Protocol):
         ...
 
 
-class RemoteInfEngine:
+class RemoteInfEngine(InferenceEngine):
     """
     Base implementation for HTTP-based remote inference engines.
 
@@ -249,6 +288,48 @@ class RemoteInfEngine:
 
         self.workflow_executor: WorkflowExecutor
         self.local_server_processes: list[LocalInfServerInfo] = []
+
+    def _create_session(self) -> aiohttp.ClientSession:
+        """Create a ClientSession for the current asyncio coroutine.
+
+        Returns
+        -------
+        aiohttp.ClientSession
+            A new client session object
+        """
+        return aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=self.config.request_timeout,
+                sock_connect=self.config.request_timeout,
+                connect=self.config.request_timeout,
+            ),
+            read_bufsize=1024 * 1024 * 10,
+            connector=get_default_connector(),
+        )
+
+    @asynccontextmanager
+    async def managed_session(self):
+        """Provide a managed ClientSession with automatic lifecycle handling.
+
+        Creates a ClientSession, stores it in task-local context for nested
+        agenerate() calls to reuse, and ensures proper cleanup.
+
+        Yields
+        ------
+            None
+
+        Examples
+        --------
+            async with engine.managed_session():
+                result = await engine.agenerate(request)
+        """
+        session = self._create_session()
+        token = _session_storage.set(session)
+        try:
+            yield
+        finally:
+            await session.close()
+            _session_storage.reset(token)
 
     def _wait_for_server(self, address):
         """Wait for a server to become healthy."""
@@ -435,70 +516,68 @@ class RemoteInfEngine:
             self.rid_to_address[req.rid] = server_addr
             self.rid_queue.append(req.rid)
 
-        # Create a new session because we don't know whether this method
-        # is called in the workflow thread or the main thread.
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(
-                total=self.config.request_timeout,
-                sock_connect=self.config.request_timeout,
-                connect=self.config.request_timeout,
-            ),
-            read_bufsize=1024 * 1024 * 10,
-            connector=get_default_connector(),
-        ) as session:
-            # Deal with rollout interruption
-            stop_reason = None
-            while (
-                stop_reason not in ["stop", "tool_calls", "length"]
-                and len(accumulated_output_tokens) < gconfig.max_new_tokens
-            ):
-                # Request is interrupted, wait for some time to avoid interfering
-                # with update weights requests
-                while self.workflow_executor.is_paused():
-                    await asyncio.sleep(0.5)
+        # Get or create task-local session
+        session_cleanup = False
+        try:
+            session = _session_storage.get()
+        except LookupError:
+            session = self._create_session()
+            session_cleanup = True
 
-                # Build request using backend
-                http_req = self.backend.build_generation_request(
-                    req, self.lora_initialized
-                )
+        # Deal with rollout interruption
+        stop_reason = None
+        while (
+            stop_reason not in ["stop", "tool_calls", "length"]
+            and len(accumulated_output_tokens) < gconfig.max_new_tokens
+        ):
+            # Request is interrupted, wait for some time to avoid interfering
+            # with update weights requests
+            while self.workflow_executor.is_paused():
+                await asyncio.sleep(0.5)
 
-                # Loop until the generation is complete
-                result = await arequest_with_retry(
-                    session=session,
-                    addr=server_addr,
-                    endpoint=http_req.endpoint,
-                    payload=http_req.payload,
-                    method=http_req.method,
-                    max_retries=self.config.request_retries,
-                    timeout=self.config.request_timeout,
-                )
+            # Build request using backend
+            http_req = self.backend.build_generation_request(req, self.lora_initialized)
 
-                # Parse response using backend
-                gen_result = self.backend.parse_generation_response(result)
-                stop_reason = gen_result.stop_reason
+            # Loop until the generation is complete
+            result = await arequest_with_retry(
+                session=session,
+                addr=server_addr,
+                endpoint=http_req.endpoint,
+                payload=http_req.payload,
+                method=http_req.method,
+                max_retries=self.config.request_retries,
+                timeout=self.config.request_timeout,
+            )
 
-                # Update accumulated outputs
-                accumulated_output_tokens.extend(gen_result.output_tokens)
-                accumulated_output_logprobs.extend(gen_result.output_logprobs)
-                accumulated_versions.extend(
-                    [self.get_version()] * len(gen_result.output_tokens)
-                )
+            # Parse response using backend
+            gen_result = self.backend.parse_generation_response(result)
+            stop_reason = gen_result.stop_reason
 
-                # Update request for next iteration
-                req.input_ids += gen_result.output_tokens
-                req.gconfig.max_new_tokens -= len(gen_result.output_tokens)
-                assert req.gconfig.max_new_tokens >= 0, (
-                    req.gconfig.max_new_tokens,
-                    len(gen_result.output_tokens),
-                    len(req.input_ids),
-                )
+            # Update accumulated outputs
+            accumulated_output_tokens.extend(gen_result.output_tokens)
+            accumulated_output_logprobs.extend(gen_result.output_logprobs)
+            accumulated_versions.extend(
+                [self.get_version()] * len(gen_result.output_tokens)
+            )
 
-            # Final abort handling
-            if stop_reason == "abort":
-                # If stop_reason is "abort", the only reason we exit the loop is
-                # len(accumulated_output_tokens) >= gconfig.max_new_tokens
-                # so the actual reason is length
-                stop_reason = "length"
+            # Update request for next iteration
+            req.input_ids += gen_result.output_tokens
+            req.gconfig.max_new_tokens -= len(gen_result.output_tokens)
+            assert req.gconfig.max_new_tokens >= 0, (
+                req.gconfig.max_new_tokens,
+                len(gen_result.output_tokens),
+                len(req.input_ids),
+            )
+
+        if session_cleanup:
+            await session.close()
+
+        # Final abort handling
+        if stop_reason == "abort":
+            # If stop_reason is "abort", the only reason we exit the loop is
+            # len(accumulated_output_tokens) >= gconfig.max_new_tokens
+            # so the actual reason is length
+            stop_reason = "length"
 
         latency = time.perf_counter() - start_time
 
@@ -666,7 +745,7 @@ class RemoteInfEngine:
 
     def wait(
         self, count: int, timeout: float | None = None, raise_timeout: bool = True
-    ) -> dict[str, Any] | NoResult:
+    ) -> list[dict[str, Any] | None]:
         """Wait for a specified number of requests to complete.
 
         Parameters
@@ -680,8 +759,9 @@ class RemoteInfEngine:
 
         Returns
         -------
-        Dict[str, Any] | NoResult
-            A concatenated batch of trajectories, or NO_RESULT if timeout exceeded and raise_timeout is False
+        list[dict[str, Any] | None]
+            A list of trajectory dictionaries. Each element may be None for rejected trajectories.
+            Returns an empty list if timeout exceeded and raise_timeout is False.
         """
         return self.workflow_executor.wait(
             count, timeout=timeout, raise_timeout=raise_timeout
@@ -755,16 +835,8 @@ class RemoteInfEngine:
     @trace_perf("remote_inf_engine.pause_generation", category="misc")
     def pause_generation(self):
         """Pause request submission for async rollout."""
-        try:
-            pause_req = self.backend.get_pause_request()
-            for addr in self.addresses:
-                res = requests.post(
-                    f"http://{addr}{pause_req.endpoint}",
-                    json=pause_req.payload,
-                )
-                res.raise_for_status()
-        except NotImplementedError:
-            self.logger.warning("Backend does not support pause operation")
+        pause_req = self.backend.get_pause_request()
+        self._run_request_on_all_servers(pause_req)
 
         # The above http request may require some time to be scheduled and executed.
         # The following line waits until all requests are indeed dropped.
@@ -773,16 +845,8 @@ class RemoteInfEngine:
     @trace_perf("remote_inf_engine.continue_generation", category="misc")
     def continue_generation(self):
         """Resume request submission for async rollout."""
-        try:
-            resume_req = self.backend.get_resume_request()
-            for addr in self.addresses:
-                res = requests.post(
-                    f"http://{addr}{resume_req.endpoint}",
-                    json=resume_req.payload,
-                )
-                res.raise_for_status()
-        except NotImplementedError:
-            self.logger.warning("Backend does not support resume operation")
+        resume_req = self.backend.get_resume_request()
+        self._run_request_on_all_servers(resume_req)
 
     def pause(self):
         """Pause request submission for async rollout.
@@ -793,6 +857,40 @@ class RemoteInfEngine:
     def resume(self):
         """Resume request submission for async rollout."""
         return self.workflow_executor.resume()
+
+    def offload(self) -> None:
+        """Offload model memory on all servers."""
+        offload_req = self.backend.get_offload_request()
+        self._run_request_on_all_servers(offload_req)
+
+    def onload(self, tags: list[str] | None = None) -> None:
+        """Onload model memory on all servers."""
+        onload_req = self.backend.get_onload_request(tags=tags)
+        self._run_request_on_all_servers(onload_req)
+
+    def _run_request_on_all_servers(self, req: HttpRequest):
+        async def _fn():
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.config.request_timeout),
+                read_bufsize=1024 * 1024 * 10,
+                connector=get_default_connector(),
+            ) as session:
+                jobs = []
+                for addr in self.addresses:
+                    jobs.append(
+                        arequest_with_retry(
+                            session=session,
+                            addr=addr,
+                            endpoint=req.endpoint,
+                            payload=req.payload,
+                            method=req.method,
+                            max_retries=self.config.request_retries,
+                            timeout=self.config.request_timeout,
+                        )
+                    )
+                await asyncio.gather(*jobs)
+
+        uvloop.run(_fn())
 
     def launch_server(self, server_args: dict[str, Any]) -> LocalInfServerInfo:
         """Launch a local inference server."""

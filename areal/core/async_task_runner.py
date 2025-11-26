@@ -12,9 +12,9 @@ import asyncio
 import queue
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 import uvloop
 
@@ -191,9 +191,19 @@ class AsyncTaskRunner(Generic[T]):
             maxsize=max_queue_size
         )
 
+        # Async loop coordination
+        self._loop_ready = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._input_event: asyncio.Event | None = None
+
         # Thread exception handling
         self._thread_exception_lock = threading.Lock()
         self._thread_exception: Exception | None = None
+
+        # Shutdown hooks for cleanup in background thread
+        # Hooks are async functions that execute in the event loop during shutdown
+        self._shutdown_hooks: list[Callable[[], Awaitable[None]]] = []
+        self._shutdown_hooks_lock = threading.Lock()
 
         # Will be set in initialize()
         self.logger = None
@@ -214,8 +224,15 @@ class AsyncTaskRunner(Generic[T]):
         self.logger = logger
 
         # Start the background thread (daemon=True for automatic cleanup)
+        self.exiting.clear()
+        # Always start in resumed state; previous pause() should not leak
+        self.paused.clear()
+
+        # Reset the readiness event before spinning up the new worker thread
+        self._loop_ready.clear()
         self.thread = threading.Thread(target=self._run_thread, daemon=True)
         self.thread.start()
+        self._loop_ready.wait()
 
     def destroy(self):
         """Shutdown the task runner and wait for thread cleanup.
@@ -224,8 +241,44 @@ class AsyncTaskRunner(Generic[T]):
         it to complete. All pending tasks will be cancelled.
         """
         self.exiting.set()
+        self.paused.clear()
+
+        self._signal_new_input()
         if self.thread is not None:
             self.thread.join()
+
+    def register_shutdown_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
+        """Register an async cleanup function to be called during shutdown.
+
+        The hook will be executed in the AsyncTaskRunner's background thread
+        event loop during the finally block of _run_async_loop(), before
+        cancelling pending tasks.
+
+        Hooks are called in reverse registration order (LIFO - like context
+        managers and atexit handlers).
+
+        Parameters
+        ----------
+        hook : Callable[[], Awaitable[None]]
+            An async function that performs cleanup. Should not raise exceptions.
+            If it does raise, the exception will be logged but won't prevent
+            other hooks from running.
+
+        Examples
+        --------
+        >>> async def cleanup_session():
+        ...     if hasattr(_session_storage, 'session'):
+        ...         await _session_storage.session.close()
+        >>> runner.register_shutdown_hook(cleanup_session)
+        """
+        with self._shutdown_hooks_lock:
+            if self.exiting.is_set():
+                if self.logger:
+                    self.logger.warning(
+                        f"Shutdown hook {hook.__name__} registered after shutdown started"
+                    )
+                return
+            self._shutdown_hooks.append(hook)
 
     def _check_thread_health(self):
         """Check if the background thread has encountered a fatal error.
@@ -248,7 +301,11 @@ class AsyncTaskRunner(Generic[T]):
         Runs the async event loop and handles exceptions.
         """
         try:
-            uvloop.run(self._run_async_loop())
+            loop = uvloop.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            self._loop_ready.set()
+            loop.run_until_complete(self._run_async_loop())
         except Exception as e:
             # Store exception for thread-safe access
             with self._thread_exception_lock:
@@ -258,8 +315,14 @@ class AsyncTaskRunner(Generic[T]):
                     f"AsyncTaskRunner thread failed with exception: {e}",
                     exc_info=True,
                 )
-            # Signal that we're exiting due to error
+        finally:
+            # Signal shutdown regardless of success/failure so other threads do not hang.
             self.exiting.set()
+            self._loop_ready.set()
+            if self._loop is not None:
+                loop = self._loop
+                self._loop = None
+                loop.close()
 
     async def _run_async_loop(self):
         """Main async event loop that processes tasks.
@@ -271,49 +334,35 @@ class AsyncTaskRunner(Generic[T]):
         4. Places results in output_queue
         5. Continues until exiting signal is set
         """
+        self._input_event = asyncio.Event()
+        self._input_event.set()
+
         running_tasks: dict[str, _Task[T]] = {}
         task_id = 0
 
         try:
             while not self.exiting.is_set():
-                # Pull new tasks from input queue when not paused
-                while not self.paused.is_set() and self.input_queue.qsize() > 0:
-                    try:
-                        task_input = self.input_queue.get_nowait()
-                        task_input: _TaskInput[T]
+                if self.paused.is_set():
+                    await asyncio.sleep(self.poll_sleep_time)
+                    continue
 
-                        # Create asyncio task
-                        async_task = asyncio.create_task(
-                            task_input.async_fn(*task_input.args, **task_input.kwargs),
-                            name=str(task_id),
-                        )
+                # running_tasks is mutated in-place as we enqueue freshly created asyncio tasks
+                tasks_added = self._drain_pending_inputs(running_tasks, task_id)
+                task_id += tasks_added
 
-                        # Store task with metadata
-                        running_tasks[str(task_id)] = _Task(
-                            create_time=time.monotonic_ns(),
-                            task=async_task,
-                            task_input=task_input,
-                        )
+                if not running_tasks:
+                    await self._wait_for_new_tasks()
+                    continue
 
-                        if self.enable_tracing and self.logger:
-                            self.logger.info(
-                                f"AsyncTaskRunner: Submitted task {task_id}. "
-                                f"Running: {len(running_tasks)}"
-                            )
+                tasks = [t.task for t in running_tasks.values()]
+                done, _ = await asyncio.wait(
+                    tasks,
+                    timeout=self.poll_wait_time,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
 
-                        task_id += 1
-                    except queue.Empty:
-                        break
-
-                # Wait for any task to complete
-                done = []
-                if running_tasks:
-                    tasks = [t.task for t in running_tasks.values()]
-                    done, _ = await asyncio.wait(
-                        tasks,
-                        timeout=self.poll_wait_time,
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
+                if not done:
+                    continue
 
                 # Process completed tasks
                 for async_task in done:
@@ -338,9 +387,11 @@ class AsyncTaskRunner(Generic[T]):
 
                     try:
                         # Place result in output queue
-                        self.output_queue.put_nowait(
-                            TimedResult(create_time=task_obj.create_time, data=result)
+                        timed_result: TimedResult[T] = TimedResult(
+                            create_time=task_obj.create_time,
+                            data=cast(T, result),
                         )
+                        self.output_queue.put_nowait(timed_result)
                         if self.enable_tracing and self.logger:
                             self.logger.info(
                                 f"AsyncTaskRunner: Completed task {tid}. "
@@ -359,9 +410,22 @@ class AsyncTaskRunner(Generic[T]):
                         raise TaskQueueFullError(
                             "Output queue full. Please increase max_queue_size."
                         )
-                # Sleep to avoid busy-waiting
-                await asyncio.sleep(self.poll_sleep_time)
         finally:
+            self._input_event = None
+            # Execute shutdown hooks in reverse order (LIFO)
+            # This happens in the background thread's event loop
+            if self._shutdown_hooks:
+                for hook in reversed(self._shutdown_hooks):
+                    try:
+                        await hook()
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.error(
+                                f"Shutdown hook {hook.__name__} failed: {e}",
+                                exc_info=True,
+                            )
+                        # Continue executing other hooks even if one fails
+
             # Cancel all remaining tasks on shutdown
             pending_tasks = [
                 task_obj.task
@@ -372,6 +436,56 @@ class AsyncTaskRunner(Generic[T]):
                 for task in pending_tasks:
                     task.cancel()
                 await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    def _drain_pending_inputs(
+        self,
+        running_tasks: dict[str, _Task[T]],
+        next_task_id: int,
+    ) -> int:
+        tasks_added = 0
+        while not self.paused.is_set():
+            try:
+                task_input = self.input_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            tid = str(next_task_id + tasks_added)
+            coroutine: Coroutine[Any, Any, T] = cast(
+                Coroutine[Any, Any, T],
+                task_input.async_fn(*task_input.args, **task_input.kwargs),
+            )
+            async_task = asyncio.create_task(coroutine, name=tid)
+            running_tasks[tid] = _Task(
+                create_time=time.monotonic_ns(),
+                task=async_task,
+                task_input=task_input,
+            )
+            if self.enable_tracing and self.logger:
+                self.logger.info(
+                    f"AsyncTaskRunner: Submitted task {tid}. "
+                    f"Running: {len(running_tasks)}"
+                )
+            tasks_added += 1
+
+        return tasks_added
+
+    async def _wait_for_new_tasks(self) -> None:
+        if self._input_event is None:
+            await asyncio.sleep(self.poll_sleep_time)
+            return
+
+        while not self.exiting.is_set() and not self.paused.is_set():
+            # This double-check of the queue size around clearing the event is crucial
+            # to prevent a race condition. The race occurs if a producer adds an item
+            # and sets the event *after* this thread checks the queue but *before*
+            # it clears the event. Without the second check, this thread would clear
+            # the event and then wait, potentially missing the wakeup signal.
+            if self.input_queue.qsize() > 0:
+                return
+            self._input_event.clear()
+            if self.input_queue.qsize() > 0 or self.exiting.is_set():
+                return
+            await self._input_event.wait()
 
     def submit(
         self,
@@ -423,6 +537,8 @@ class AsyncTaskRunner(Generic[T]):
                 "wait for tasks to complete."
             )
 
+        self._signal_new_input()
+
     def wait(
         self, count: int, timeout: float | None = None, with_timing: bool = False
     ) -> list[TimedResult[T]] | list[T]:
@@ -465,31 +581,34 @@ class AsyncTaskRunner(Generic[T]):
         3
         """
         start_time = time.perf_counter()
-        timeout = timeout or float(7 * 24 * 3600)  # 7 days default
+        if timeout is None:
+            timeout = float(7 * 24 * 3600)  # 7 days default
 
-        while not self.exiting.is_set() and time.perf_counter() - start_time < timeout:
-            # Check thread health
+        deadline = start_time + timeout
+        results_to_return: list[TimedResult[T]] = []
+
+        while len(results_to_return) < count:
             self._check_thread_health()
 
-            if self.get_output_queue_size() >= count:
-                break
+            if self.exiting.is_set():
+                raise RuntimeError(
+                    "AsyncTaskRunner is exiting, cannot wait for results."
+                )
 
-            # Sleep briefly to avoid busy waiting
-            time.sleep(self.poll_sleep_time)
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Timed out waiting for {count} results, only received {len(results_to_return)}."
+                )
 
-        # Check exit conditions
-        if self.exiting.is_set():
-            self._check_thread_health()
-            raise RuntimeError("AsyncTaskRunner is exiting, cannot wait for results.")
+            try:
+                wait_time = min(self.poll_sleep_time, remaining)
+                result = self.output_queue.get(timeout=wait_time)
+            except queue.Empty:
+                continue
 
-        accepted = self.get_output_queue_size()
-        if accepted < count:
-            raise TimeoutError(
-                f"Timed out waiting for {count} results, only received {accepted}."
-            )
+            results_to_return.append(result)
 
-        # Extract the requested number of results, sorted by return time
-        results_to_return = [self.output_queue.get() for _ in range(count)]
         if with_timing:
             return results_to_return
         return [r.data for r in results_to_return]
@@ -535,6 +654,7 @@ class AsyncTaskRunner(Generic[T]):
         started.
         """
         self.paused.clear()
+        self._signal_new_input()
 
     def get_queue_sizes(self) -> tuple[int, int]:
         """Get current sizes of input and output queues.
@@ -565,3 +685,14 @@ class AsyncTaskRunner(Generic[T]):
             Number of completed results waiting in the output queue.
         """
         return self.output_queue.qsize()
+
+    def _signal_new_input(self):
+        loop = self._loop
+        input_event = self._input_event
+        if loop is None or input_event is None:
+            return
+
+        try:
+            loop.call_soon_threadsafe(input_event.set)
+        except RuntimeError:
+            pass

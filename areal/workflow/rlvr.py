@@ -15,9 +15,13 @@ from areal.api.engine_api import InferenceEngine
 from areal.api.io_struct import ModelRequest, ModelResponse
 from areal.api.reward_api import AsyncRewardWrapper
 from areal.api.workflow_api import RolloutWorkflow
-from areal.utils import logging, perf_tracer, stats_tracker
+from areal.utils import logging, stats_tracker
 from areal.utils.data import concat_padded_tensors
-from areal.utils.perf_tracer import atrace_session_phase, trace_perf, trace_session
+from areal.utils.perf_tracer import (
+    atrace_session_phase,
+    session_context,
+    trace_session,
+)
 
 logger = logging.getLogger("RLVR workflow")
 
@@ -59,7 +63,7 @@ class RLVRWorkflow(RolloutWorkflow):
         ] = default_data_extract_prompt_fn,
     ):
         self.reward_fn = reward_fn
-        self.gconfig = gconfig
+        self.gconfig = gconfig.new_with_stop_and_pad_token_ids(tokenizer)
         self.tokenizer = tokenizer
         self.enable_thinking = enable_thinking
         self.dump_dir = dump_dir
@@ -98,6 +102,7 @@ class RLVRWorkflow(RolloutWorkflow):
 
         return reward, completions_str
 
+    @session_context()
     async def _collect_samples(
         self,
         engine: InferenceEngine,
@@ -116,14 +121,7 @@ class RLVRWorkflow(RolloutWorkflow):
         tuple[ModelResponse, float, str]
             Model response, reward value, and completion string.
         """
-        task_id = perf_tracer.get_task_id()
-        if task_id is None:
-            session_id = None
-        else:
-            session_id = perf_tracer.register_session(task_id)
-            perf_tracer.set_session_id(session_id)
-
-        async with atrace_session_phase(session_id, "generate"):
+        async with atrace_session_phase("generate"):
             resp = await engine.agenerate(req)
 
         reward, completions_str = await self._compute_rewards(
@@ -134,7 +132,6 @@ class RLVRWorkflow(RolloutWorkflow):
 
         return resp, reward, completions_str
 
-    @trace_perf("rlvr_workflow.arun_episode", category="compute")
     async def arun_episode(
         self, engine: InferenceEngine, data: dict[str, Any]
     ) -> dict[str, torch.Tensor]:

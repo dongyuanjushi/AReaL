@@ -46,29 +46,23 @@ class GRPOTrainer:
         if self.tokenizer is None:
             self.tokenizer = load_hf_tokenizer(config.tokenizer_path)
 
-        # update the gconfig stop token ids (also updates self.config)
-        if self.tokenizer.pad_token_id not in config.gconfig.stop_token_ids:
-            config.gconfig.stop_token_ids.append(self.tokenizer.pad_token_id)
-        if self.tokenizer.eos_token_id not in config.gconfig.stop_token_ids:
-            config.gconfig.stop_token_ids.append(self.tokenizer.eos_token_id)
-
         seeding.set_random_seed(config.seed, key=f"trainer{rank}")
         self.allocation_mode = AllocationMode.from_str(config.allocation_mode)
 
         self.parallel_strategy = self.allocation_mode.train
         assert self.parallel_strategy is not None
 
-        self.inference_gen_backend = self.allocation_mode.gen_backend
-        if self.inference_gen_backend not in ["sglang", "vllm"]:
+        self.inference_backend = self.allocation_mode.gen_backend
+        if self.inference_backend not in ["sglang", "vllm"]:
             raise ValueError(
-                f"Invalid inference generation backend: {self.inference_gen_backend}, expected sglang or vllm"
+                f"Invalid inference generation backend: {self.inference_backend}, expected sglang or vllm"
             )
 
-        if self.config.actor.backend not in ["fsdp", "megatron"]:
+        self.train_backend = self.allocation_mode.train_backend
+        if self.train_backend not in ["fsdp", "megatron"]:
             raise ValueError(
-                f"Invalid backend: {self.config.actor.backend}, expected fsdp or megatron"
+                f"Invalid backend: {self.train_backend}, expected fsdp or megatron"
             )
-        self.is_megatron_backend = self.config.actor.backend == "megatron"
         # Create actor
         self.actor = self._create_train_engine(config.actor)
 
@@ -90,13 +84,13 @@ class GRPOTrainer:
 
         # Initialize train engine
         engine_init_kwargs = {"addr": None, "ft_spec": self.ft_spec}
-        if self.is_megatron_backend:
+        if self.train_backend == "megatron":
             engine_init_kwargs["parallel_strategy"] = self.parallel_strategy
             engine_init_kwargs["seed"] = config.seed
         self.actor.initialize(**engine_init_kwargs)
 
         # Prepare weight update meta and connect to inference engine
-        if self.is_megatron_backend:
+        if self.train_backend == "megatron":
             self.weight_update_meta = WeightUpdateMeta.from_megatron_xccl(
                 self.allocation_mode,
                 nccl_group_name=self.actor.weight_update_group_name,
@@ -211,8 +205,8 @@ class GRPOTrainer:
                     tokenizer=self.tokenizer,
                 )
 
-            dist.barrier(device_ids=[self.actor.device.index])
             current_platform.synchronize()
+            dist.barrier(group=self.actor.cpu_group)
 
             with stats_tracker.record_timing("eval"):
 
@@ -232,8 +226,8 @@ class GRPOTrainer:
                                 self.eval_rollout.submit(item, eval_workflow)
                                 cnt += 1
                         self.eval_rollout.wait(cnt, timeout=None)
-                    dist.barrier(device_ids=[self.actor.device.index])
                     current_platform.synchronize()
+                    dist.barrier(group=self.actor.cpu_group)
 
                 self.evaluator.evaluate(
                     evaluate_fn,
@@ -242,8 +236,8 @@ class GRPOTrainer:
                     global_step,
                 )
 
-            dist.barrier(device_ids=[self.actor.device.index])
             current_platform.synchronize()
+            dist.barrier(group=self.actor.cpu_group)
 
             # Upload statistics to the logger (e.g., wandb)
             stats = stats_tracker.export_all(
@@ -251,8 +245,8 @@ class GRPOTrainer:
             )
             self.stats_logger.commit(epoch, step, global_step, stats)
 
-            dist.barrier(device_ids=[self.actor.device.index])
             current_platform.synchronize()
+            dist.barrier(group=self.actor.cpu_group)
 
             # Resume rollout
             self.rollout.resume()
@@ -288,13 +282,13 @@ class GRPOTrainer:
         self, actor_config: PPOActorConfig
     ) -> FSDPPPOActor | MegatronPPOActor:
         # Initialize train engine
-        if actor_config.backend == "fsdp":
+        if self.train_backend == "fsdp":
             actor = FSDPPPOActor(config=actor_config)
-        elif actor_config.backend == "megatron":
+        elif self.train_backend == "megatron":
             actor = MegatronPPOActor(config=actor_config)
         else:
             raise ValueError(
-                f"Invalid backend: {actor_config.backend}, expected fsdp or megatron"
+                f"Invalid backend: {self.train_backend}, expected fsdp or megatron"
             )
         actor.create_process_group(parallel_strategy=self.parallel_strategy)
         return actor
@@ -303,13 +297,13 @@ class GRPOTrainer:
         self, rollout_config: InferenceEngineConfig, is_eval: bool = False
     ) -> InferenceEngine:
         # Initialize inference engine
-        if self.inference_gen_backend == "sglang":
+        if self.inference_backend == "sglang":
             engine = RemoteSGLangEngine(deepcopy(rollout_config))
-        elif self.inference_gen_backend == "vllm":
+        elif self.inference_backend == "vllm":
             engine = RemotevLLMEngine(deepcopy(rollout_config))
         else:
             raise ValueError(
-                f"Invalid backend: {self.allocation_mode.gen_backend}, expected sglang or vllm"
+                f"Invalid backend: {self.inference_backend}, expected sglang or vllm"
             )
 
         if is_eval:
