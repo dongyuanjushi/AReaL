@@ -673,9 +673,9 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             )
         
         # query, key, value shape: [S, B, H, D] -> [B, H, S, D]
-        query = query.permute(1, 2, 0, 3).contiguous()
-        key = key.permute(1, 2, 0, 3).contiguous()
-        value = value.permute(1, 2, 0, 3).contiguous()
+        query = query.permute(1, 2, 0, 3) # .contiguous()
+        key = key.permute(1, 2, 0, 3) # .contiguous()
+        value = value.permute(1, 2, 0, 3) # .contiguous()
         enable_gqa = query.shape[1] != key.shape[1]
 
         if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
@@ -739,7 +739,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             )
 
         # output shape: [B, H, S, D] -> [S, B, H, D] -> [S, B, H*D]
-        output = output.permute(2, 0, 1, 3).contiguous().view(output.shape[2], output.shape[0], -1)
+        output = output.permute(2, 0, 1, 3).view(output.shape[2], output.shape[0], -1)
         return output
 
 # Copied from megatron core to support arbitrary attention mask for tree training.
