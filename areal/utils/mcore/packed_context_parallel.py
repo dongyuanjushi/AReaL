@@ -4,6 +4,7 @@ import torch
 import torch.distributed as dist
 from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
+from areal.utils.perf_tracer import trace_perf, trace_scope
 
 
 def preprocess_packed_seqs_context_parallel(
@@ -120,6 +121,7 @@ def postprocess_packed_seqs_context_parallel(
     return output_new
 
 
+@trace_perf("packed_context_parallel_forward")
 def packed_context_parallel_forward(
     model: torch.nn.Module,
     input_: dict[str, Any],
