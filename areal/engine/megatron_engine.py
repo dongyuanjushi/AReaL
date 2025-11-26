@@ -121,7 +121,7 @@ class MegatronEngine(TrainEngine):
         self.checkpointer = None
         self.seed = 0
         self.own_global_group = False
-        self.enable_tree_trainig = self.mcore_config.enable_tree_training
+        self.enable_tree_training = self.mcore_config.enable_tree_training
 
     def initialize(
         self,
