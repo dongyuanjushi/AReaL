@@ -684,13 +684,13 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             attention_mask = attention_mask.masked_fill_(_attention_mask, float('-inf'))
             # GQA on xformer backend attention requires key and value heads be expanded to match query heads.
             if enable_gqa:
-                key = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
-                value = value.repeat_interleave(query.shape[1] // value.shape[1], dim=1)
-                # repeat_factor = query.shape[1] // key.shape[1]
-                # # Use expand instead of repeat_interleave to avoid memory allocation
-                # # Shape: [B, kv_heads, S, D] -> [B, kv_heads, repeat_factor, S, D] -> [B, q_heads, S, D]
-                # key = key.unsqueeze(2).expand(-1, -1, repeat_factor, -1, -1).reshape(key.shape[0], query.shape[1], key.shape[2], key.shape[3])
-                # value = value.unsqueeze(2).expand(-1, -1, repeat_factor, -1, -1).reshape(value.shape[0], query.shape[1], value.shape[2], value.shape[3])
+                # key = key.repeat_interleave(query.shape[1] // key.shape[1], dim=1)
+                # value = value.repeat_interleave(query.shape[1] // value.shape[1], dim=1)
+                repeat_factor = query.shape[1] // key.shape[1]
+                # Use expand instead of repeat_interleave to avoid memory allocation
+                # Shape: [B, kv_heads, S, D] -> [B, kv_heads, repeat_factor, S, D] -> [B, q_heads, S, D]
+                key = key.unsqueeze(2).expand(-1, -1, repeat_factor, -1, -1).reshape(key.shape[0], query.shape[1], key.shape[2], key.shape[3])
+                value = value.unsqueeze(2).expand(-1, -1, repeat_factor, -1, -1).reshape(value.shape[0], query.shape[1], value.shape[2], value.shape[3])
             with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
                 params = SDPAParams(
                     query,
