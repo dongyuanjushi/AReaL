@@ -394,6 +394,11 @@ def test_tree_training_forward_backward(mock_tree_input):
     common_keys = baseline_keys & tree_keys
     logger.info(f"Comparing {len(common_keys)} common gradient tensors")
     
+    for k, v in baseline_grads.items():
+        print(f"baseline_grads[{k}].shape={v.shape}, dtype={v.dtype} mean(v)={v.float().mean().item():.6e}")
+    for k, v in tree_grads.items():
+        print(f"tree_grads[{k}].shape={v.shape}, dtype={v.dtype} mean(v)={v.float().mean().item():.6e}")
+
     # Check for NaN gradients
     nan_in_baseline = []
     nan_in_tree = []
