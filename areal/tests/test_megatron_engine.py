@@ -394,6 +394,29 @@ def test_tree_training_forward_backward(mock_tree_input):
     common_keys = baseline_keys & tree_keys
     logger.info(f"Comparing {len(common_keys)} common gradient tensors")
     
+    # Check for NaN gradients
+    nan_in_baseline = []
+    nan_in_tree = []
+    for name in sorted(common_keys):
+        if torch.isnan(baseline_grads[name]).any():
+            nan_in_baseline.append(name)
+        if torch.isnan(tree_grads[name]).any():
+            nan_in_tree.append(name)
+    
+    if nan_in_baseline:
+        print(f"\n⚠ NaN gradients in BASELINE ({len(nan_in_baseline)}):")
+        for name in nan_in_baseline:
+            nan_count = torch.isnan(baseline_grads[name]).sum().item()
+            total_count = baseline_grads[name].numel()
+            print(f"  {name}: {nan_count}/{total_count} NaN values")
+    
+    if nan_in_tree:
+        print(f"\n⚠ NaN gradients in TREE TRAINING ({len(nan_in_tree)}):")
+        for name in nan_in_tree:
+            nan_count = torch.isnan(tree_grads[name]).sum().item()
+            total_count = tree_grads[name].numel()
+            print(f"  {name}: {nan_count}/{total_count} NaN values")
+    
     mismatched_params = []
     max_diff_overall = 0.0
     
@@ -424,6 +447,8 @@ def test_tree_training_forward_backward(mock_tree_input):
     print(f"  Total baseline gradients: {len(baseline_keys)}")
     print(f"  Total tree gradients: {len(tree_keys)}")
     print(f"  Common gradients: {len(common_keys)}")
+    print(f"  NaN in baseline: {len(nan_in_baseline)}")
+    print(f"  NaN in tree training: {len(nan_in_tree)}")
     print(f"  Mismatched parameters: {len(mismatched_params)}")
     print(f"  Max diff overall: {max_diff_overall:.6e}")
     
@@ -435,6 +460,8 @@ def test_tree_training_forward_backward(mock_tree_input):
     # Assert no mismatches
     assert len(only_in_baseline) == 0, f"Gradients missing in tree training: {only_in_baseline}"
     assert len(only_in_tree) == 0, f"Gradients missing in baseline: {only_in_tree}"
+    assert len(nan_in_baseline) == 0, f"NaN gradients in baseline: {nan_in_baseline}"
+    assert len(nan_in_tree) == 0, f"NaN gradients in tree training: {nan_in_tree}"
     assert len(mismatched_params) == 0, f"Gradient mismatches found: {mismatched_params}"
     
     print("\n✓ All gradients match between baseline and tree training!")
