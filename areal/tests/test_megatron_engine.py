@@ -258,6 +258,188 @@ def test_tree_training_forward(engine, mock_tree_input):
     assert torch.allclose(logprob_baseline, logprob_tree, atol=1e-6)
 
 
+def test_tree_training_forward_backward(mock_tree_input):
+    """Test that tree training produces correct gradients for every weight in the model.
+    
+    This test compares gradients computed via:
+    1. Baseline: Standard forward-backward pass with regular batched computation
+    2. Tree training: Forward-backward pass with tree-structured deduplication
+    
+    Both should produce identical gradients for all model parameters.
+    """
+    for k, v in mock_tree_input.items():
+        print(f"mock_tree_input[{k}].shape={v.shape}, dtype={v.dtype} v=\n{v}")
+
+    def loss_fn_tree_training(logits, input_data):
+        """Loss function for tree training that uses packed tree gather."""
+        input_ids = input_data["input_ids"]
+        sequence_ids = input_data["sequence_ids"]
+        seq_id_to_tree_indices = input_data["seq_id_to_tree_indices"]
+        logprobs = packed_tree_gather_logprobs(
+            logits, input_ids, sequence_ids, seq_id_to_tree_indices, 1.0
+        )
+        # Sum of log probs as loss (for gradient comparison)
+        return logprobs.sum()
+
+    def loss_fn_baseline(logits, input_data):
+        """Standard loss function using regular gather."""
+        labels = input_data.get(
+            "rolled_input_ids",
+            torch.roll(input_data["input_ids"], shifts=-1, dims=-1),
+        )
+        logprobs = gather_logprobs(logits, labels, 1.0)
+        # Sum of log probs as loss (for gradient comparison)
+        return logprobs.sum()
+
+    # ========== Setup baseline engine ==========
+    os.environ.update(
+        {
+            "WORLD_SIZE": "1",
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "7778",
+        }
+    )
+    baseline_config = TrainEngineConfig(
+        experiment_name="test_baseline",
+        trial_name="test",
+        path=MODEL_PATH,
+        mb_spec=MicroBatchSpec(max_tokens_per_mb=1024),
+        optimizer=OptimizerConfig(),
+        megatron=MegatronEngineConfig(
+            use_deterministic_algorithms=True,
+        ),
+    )
+    alloc_mode = AllocationMode.from_str("d1p1t1")
+    ft_spec = FinetuneSpec(total_train_epochs=1, dataset_size=128, train_batch_size=8)
+    
+    baseline_engine = MegatronEngine(baseline_config)
+    baseline_engine.create_process_group(alloc_mode.train)
+    baseline_engine.initialize(addr=None, ft_spec=ft_spec, parallel_strategy=alloc_mode.train)
+    baseline_engine.train()
+    
+    # Run baseline forward-backward
+    _ = baseline_engine.train_batch(
+        mock_tree_input,
+        loss_fn=loss_fn_baseline,
+        loss_weight_fn=lambda x: torch.tensor(1.0, device=baseline_engine.device),
+    )
+    
+    # Collect baseline gradients
+    baseline_grads = {}
+    for name, param in baseline_engine.model.named_parameters():
+        if param.grad is not None:
+            baseline_grads[name] = param.grad.clone()
+    
+    logger.info(f"Collected {len(baseline_grads)} gradients from baseline engine")
+    baseline_engine.destroy()
+    
+    # ========== Setup tree training engine ==========
+    os.environ.update(
+        {
+            "WORLD_SIZE": "1",
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "7779",
+        }
+    )
+    tree_config = TrainEngineConfig(
+        experiment_name="test_tree",
+        trial_name="test",
+        path=MODEL_PATH,
+        mb_spec=MicroBatchSpec(max_tokens_per_mb=1024),
+        optimizer=OptimizerConfig(),
+        megatron=MegatronEngineConfig(
+            enable_tree_training=True,
+            use_deterministic_algorithms=True,
+        ),
+    )
+    
+    tree_engine = MegatronEngine(tree_config)
+    tree_engine.create_process_group(alloc_mode.train)
+    tree_engine.initialize(addr=None, ft_spec=ft_spec, parallel_strategy=alloc_mode.train)
+    tree_engine.train()
+    
+    # Run tree training forward-backward
+    _ = tree_engine.train_batch(
+        mock_tree_input,
+        loss_fn=loss_fn_tree_training,
+        loss_weight_fn=lambda x: torch.tensor(1.0, device=tree_engine.device),
+    )
+    
+    # Collect tree training gradients
+    tree_grads = {}
+    for name, param in tree_engine.model.named_parameters():
+        if param.grad is not None:
+            tree_grads[name] = param.grad.clone()
+    
+    logger.info(f"Collected {len(tree_grads)} gradients from tree training engine")
+    tree_engine.destroy()
+    
+    # ========== Compare gradients ==========
+    baseline_keys = set(baseline_grads.keys())
+    tree_keys = set(tree_grads.keys())
+    
+    # Check for missing keys
+    only_in_baseline = baseline_keys - tree_keys
+    only_in_tree = tree_keys - baseline_keys
+    
+    if only_in_baseline:
+        logger.warning(f"Gradients only in baseline: {only_in_baseline}")
+    if only_in_tree:
+        logger.warning(f"Gradients only in tree training: {only_in_tree}")
+    
+    common_keys = baseline_keys & tree_keys
+    logger.info(f"Comparing {len(common_keys)} common gradient tensors")
+    
+    mismatched_params = []
+    max_diff_overall = 0.0
+    
+    for name in sorted(common_keys):
+        baseline_grad = baseline_grads[name]
+        tree_grad = tree_grads[name]
+        
+        if baseline_grad.shape != tree_grad.shape:
+            mismatched_params.append((name, f"shape mismatch: {baseline_grad.shape} vs {tree_grad.shape}"))
+            continue
+        
+        diff = (baseline_grad - tree_grad).abs()
+        max_diff = diff.max().item()
+        mean_diff = diff.mean().item()
+        max_diff_overall = max(max_diff_overall, max_diff)
+        
+        if max_diff > 1e-5:
+            mismatched_params.append((name, f"max_diff={max_diff:.6e}, mean_diff={mean_diff:.6e}"))
+            print(f"Gradient mismatch for {name}:")
+            print(f"  Shape: {baseline_grad.shape}")
+            print(f"  Baseline grad mean: {baseline_grad.float().mean().item():.6e}")
+            print(f"  Tree grad mean: {tree_grad.float().mean().item():.6e}")
+            print(f"  Max diff: {max_diff:.6e}, Mean diff: {mean_diff:.6e}")
+    
+    print(f"\n{'='*60}")
+    print("GRADIENT COMPARISON SUMMARY")
+    print(f"{'='*60}")
+    print(f"  Total baseline gradients: {len(baseline_keys)}")
+    print(f"  Total tree gradients: {len(tree_keys)}")
+    print(f"  Common gradients: {len(common_keys)}")
+    print(f"  Mismatched parameters: {len(mismatched_params)}")
+    print(f"  Max diff overall: {max_diff_overall:.6e}")
+    
+    if mismatched_params:
+        print(f"\nMismatched parameters:")
+        for name, reason in mismatched_params:
+            print(f"  {name}: {reason}")
+    
+    # Assert no mismatches
+    assert len(only_in_baseline) == 0, f"Gradients missing in tree training: {only_in_baseline}"
+    assert len(only_in_tree) == 0, f"Gradients missing in baseline: {only_in_tree}"
+    assert len(mismatched_params) == 0, f"Gradient mismatches found: {mismatched_params}"
+    
+    print("\n✓ All gradients match between baseline and tree training!")
+
+
 @torch.no_grad()
 def test_hf_save_load_weights(tmp_path_factory, engine, mock_input):
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
