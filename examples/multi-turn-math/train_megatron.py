@@ -206,6 +206,7 @@ def main(args):
         config.experiment_name,
         config.trial_name,
         config.cluster.fileroot,
+        clear_checkpoint_after_load=False,
     )
     actor.connect_engine(rollout, weight_update_meta)
 
