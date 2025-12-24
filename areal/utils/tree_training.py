@@ -596,7 +596,7 @@ if TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
     logger.info("Compiled torch flex attention.")
     _flex_attention = torch.compile(
         flex_attention,
-        dynamic=True,
+        dynamic=False,
         options=torch_compile_options
     )
 
