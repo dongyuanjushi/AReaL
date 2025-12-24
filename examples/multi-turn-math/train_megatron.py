@@ -198,9 +198,14 @@ def main(args):
         None, ft_spec, parallel_strategy=parallel_strategy, seed=config.seed
     )
     
-    weight_update_meta = WeightUpdateMeta.from_megatron_xccl(
-        allocation_mode,
-        nccl_group_name=actor.weight_update_group_name,
+    # weight_update_meta = WeightUpdateMeta.from_megatron_xccl(
+    #     allocation_mode,
+    #     nccl_group_name=actor.weight_update_group_name,
+    # )
+    weight_update_meta = WeightUpdateMeta.from_disk(
+        config.experiment_name,
+        config.trial_name,
+        config.cluster.fileroot,
     )
     actor.connect_engine(rollout, weight_update_meta)
 
