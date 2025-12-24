@@ -706,6 +706,8 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             # attention_mask = attention_mask.bool().squeeze(0).squeeze(0)
             q_len = attention_mask.shape[0]
 
+            print("[debug] Using compiled flex attention for tree training.", flush=True)
+
             def arbitrary_mask(
                 batch: torch.Tensor,
                 head: torch.Tensor,
@@ -714,6 +716,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             ):
                 return attention_mask[q_idx, k_idx]
             
+            print("[debug] create block mask", flush=True)
             block_mask = create_block_mask(
                 arbitrary_mask,
                 B=1,  # Broadcast across batch
@@ -724,6 +727,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 device=query.device,
                 _compile=True  # Use compiled mask creation for speed
             )
+            print("[debug] before flex attention", flush=True)
             output = _flex_attention(
                 query,
                 key,
@@ -732,6 +736,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 scale=self.softmax_scale,
                 enable_gqa=enable_gqa,
             )
+            print("[debug] after flex attention", flush=True)
         else:
             raise NotImplementedError(
                 f"Unsupported TREE_ATTENTION_BACKEND_TYPE: {TREE_ATTENTION_BACKEND_TYPE}"
