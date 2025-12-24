@@ -258,6 +258,23 @@ def test_tree_training_forward(engine, mock_tree_input):
     assert torch.allclose(logprob_baseline, logprob_tree, atol=1e-6)
 
 
+def _collect_gradients(engine) -> dict[str, torch.Tensor]:
+    """Collect gradients from Megatron engine.
+    
+    In Megatron, gradients are stored in param.main_grad (gradient buffer),
+    not param.grad. This function collects gradients from the correct location.
+    """
+    grads = {}
+    for model in engine.model:
+        for name, param in model.named_parameters():
+            # Megatron stores gradients in main_grad attribute
+            if hasattr(param, 'main_grad') and param.main_grad is not None:
+                grads[name] = param.main_grad.clone()
+            elif param.grad is not None:
+                grads[name] = param.grad.clone()
+    return grads
+
+
 def test_tree_training_forward_backward(mock_tree_input):
     """Test that tree training produces correct gradients for every weight in the model.
     
@@ -326,11 +343,8 @@ def test_tree_training_forward_backward(mock_tree_input):
         loss_weight_fn=lambda x: torch.tensor(1.0, device=baseline_engine.device),
     )
     
-    # Collect baseline gradients
-    baseline_grads = {}
-    for name, param in baseline_engine.model.named_parameters():
-        if param.grad is not None:
-            baseline_grads[name] = param.grad.clone()
+    # Collect baseline gradients using helper function
+    baseline_grads = _collect_gradients(baseline_engine)
     
     logger.info(f"Collected {len(baseline_grads)} gradients from baseline engine")
     baseline_engine.destroy()
@@ -369,11 +383,8 @@ def test_tree_training_forward_backward(mock_tree_input):
         loss_weight_fn=lambda x: torch.tensor(1.0, device=tree_engine.device),
     )
     
-    # Collect tree training gradients
-    tree_grads = {}
-    for name, param in tree_engine.model.named_parameters():
-        if param.grad is not None:
-            tree_grads[name] = param.grad.clone()
+    # Collect tree training gradients using helper function
+    tree_grads = _collect_gradients(tree_engine)
     
     logger.info(f"Collected {len(tree_grads)} gradients from tree training engine")
     tree_engine.destroy()
