@@ -725,7 +725,7 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 KV_LEN=q_len,
                 BLOCK_SIZE=128,
                 device=query.device,
-                _compile=True  # Use compiled mask creation for speed
+                _compile=False  # Use compiled mask creation for speed
             )
             print("[debug] before flex attention", flush=True)
             output = _flex_attention(
