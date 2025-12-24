@@ -275,6 +275,29 @@ def _collect_gradients(engine) -> dict[str, torch.Tensor]:
     return grads
 
 
+def _collect_parameters(engine) -> dict[str, torch.Tensor]:
+    """Collect parameters from Megatron engine."""
+    params = {}
+    for model in engine.model:
+        for name, param in model.named_parameters():
+            params[name] = param.data.clone()
+    return params
+
+
+def _check_nan_params(params: dict[str, torch.Tensor], label: str) -> list[str]:
+    """Check for NaN values in parameters and return list of affected param names."""
+    nan_params = []
+    for name, param in params.items():
+        if torch.isnan(param).any():
+            nan_count = torch.isnan(param).sum().item()
+            total_count = param.numel()
+            nan_params.append(name)
+            print(f"  {name}: {nan_count}/{total_count} NaN values")
+    if nan_params:
+        print(f"\n⚠ NaN parameters in {label} ({len(nan_params)}):")
+    return nan_params
+
+
 def test_tree_training_forward_backward(mock_tree_input):
     """Test that tree training produces correct gradients for every weight in the model.
     
@@ -343,10 +366,12 @@ def test_tree_training_forward_backward(mock_tree_input):
         loss_weight_fn=lambda x: torch.tensor(1.0, device=baseline_engine.device),
     )
     
-    # Collect baseline gradients using helper function
+    # Collect baseline gradients and updated parameters
     baseline_grads = _collect_gradients(baseline_engine)
+    baseline_params = _collect_parameters(baseline_engine)
     
     logger.info(f"Collected {len(baseline_grads)} gradients from baseline engine")
+    logger.info(f"Collected {len(baseline_params)} parameters from baseline engine")
     baseline_engine.destroy()
     
     # ========== Setup tree training engine ==========
@@ -383,10 +408,12 @@ def test_tree_training_forward_backward(mock_tree_input):
         loss_weight_fn=lambda x: torch.tensor(1.0, device=tree_engine.device),
     )
     
-    # Collect tree training gradients using helper function
+    # Collect tree training gradients and updated parameters
     tree_grads = _collect_gradients(tree_engine)
+    tree_params = _collect_parameters(tree_engine)
     
     logger.info(f"Collected {len(tree_grads)} gradients from tree training engine")
+    logger.info(f"Collected {len(tree_params)} parameters from tree training engine")
     tree_engine.destroy()
     
     # ========== Compare gradients ==========
@@ -433,6 +460,10 @@ def test_tree_training_forward_backward(mock_tree_input):
             total_count = tree_grads[name].numel()
             print(f"  {name}: {nan_count}/{total_count} NaN values")
     
+    # Check for NaN in updated parameters
+    nan_params_baseline = _check_nan_params(baseline_params, "BASELINE PARAMS")
+    nan_params_tree = _check_nan_params(tree_params, "TREE TRAINING PARAMS")
+    
     mismatched_params = []
     max_diff_overall = 0.0
     
@@ -463,9 +494,11 @@ def test_tree_training_forward_backward(mock_tree_input):
     print(f"  Total baseline gradients: {len(baseline_keys)}")
     print(f"  Total tree gradients: {len(tree_keys)}")
     print(f"  Common gradients: {len(common_keys)}")
-    print(f"  NaN in baseline: {len(nan_in_baseline)}")
-    print(f"  NaN in tree training: {len(nan_in_tree)}")
-    print(f"  Mismatched parameters: {len(mismatched_params)}")
+    print(f"  NaN in baseline grads: {len(nan_in_baseline)}")
+    print(f"  NaN in tree training grads: {len(nan_in_tree)}")
+    print(f"  NaN in baseline params: {len(nan_params_baseline)}")
+    print(f"  NaN in tree training params: {len(nan_params_tree)}")
+    print(f"  Mismatched gradients: {len(mismatched_params)}")
     print(f"  Max diff overall: {max_diff_overall:.6e}")
     
     if mismatched_params:
@@ -478,9 +511,12 @@ def test_tree_training_forward_backward(mock_tree_input):
     assert len(only_in_tree) == 0, f"Gradients missing in baseline: {only_in_tree}"
     assert len(nan_in_baseline) == 0, f"NaN gradients in baseline: {nan_in_baseline}"
     assert len(nan_in_tree) == 0, f"NaN gradients in tree training: {nan_in_tree}"
+    assert len(nan_params_baseline) == 0, f"NaN parameters in baseline: {nan_params_baseline}"
+    assert len(nan_params_tree) == 0, f"NaN parameters in tree training: {nan_params_tree}"
     assert len(mismatched_params) == 0, f"Gradient mismatches found: {mismatched_params}"
     
     print("\n✓ All gradients match between baseline and tree training!")
+    print("✓ No NaN values in updated parameters!")
 
 
 @torch.no_grad()
