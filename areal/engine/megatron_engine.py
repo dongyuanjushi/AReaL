@@ -1110,6 +1110,28 @@ class MegatronEngine(TrainEngine):
             update_successful, grad_norm, _ = self.optimizer.step()
         current_lr = self.optimizer.param_groups[0]["lr"]
 
+        # Check for NaN in gradients and parameters after optimizer step
+        nan_grads = []
+        nan_params = []
+        for model in self.model:
+            for name, param in model.named_parameters():
+                if hasattr(param, 'main_grad') and param.main_grad is not None:
+                    if torch.isnan(param.main_grad).any():
+                        nan_grads.append(name)
+                elif param.grad is not None:
+                    if torch.isnan(param.grad).any():
+                        nan_grads.append(name)
+                if torch.isnan(param.data).any():
+                    nan_params.append(name)
+        
+        if nan_grads or nan_params:
+            error_msg = "NaN detected after optimizer step!\n"
+            if nan_grads:
+                error_msg += f"  NaN gradients in {len(nan_grads)} params: {nan_grads[:5]}{'...' if len(nan_grads) > 5 else ''}\n"
+            if nan_params:
+                error_msg += f"  NaN parameters in {len(nan_params)} params: {nan_params[:5]}{'...' if len(nan_params) > 5 else ''}\n"
+            raise RuntimeError(error_msg)
+
         return dict(
             update_successful=float(update_successful),
             grad_norm=float(grad_norm) if grad_norm is not None else float("nan"),
