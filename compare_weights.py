@@ -69,18 +69,31 @@ def compare_weights(path1: str, path2: str, show_matching: bool = False):
         for key in sorted(only_in_2):
             print(f"  {key}: {tuple(state_dict2[key].shape)}")
     
-    # Common keys with shape mismatches
+    # Common keys with shape/dtype mismatches
     common_keys = keys1 & keys2
     shape_mismatches = []
+    dtype_mismatches = []
     shape_matches = []
     
     for key in sorted(common_keys):
-        shape1 = tuple(state_dict1[key].shape)
-        shape2 = tuple(state_dict2[key].shape)
+        tensor1 = state_dict1[key]
+        tensor2 = state_dict2[key]
+        shape1 = tuple(tensor1.shape)
+        shape2 = tuple(tensor2.shape)
+        dtype1 = tensor1.dtype
+        dtype2 = tensor2.dtype
+        
         if shape1 != shape2:
             shape_mismatches.append((key, shape1, shape2))
         else:
-            shape_matches.append((key, shape1))
+            # Compute mean difference for tensors with same shape
+            mean1 = tensor1.float().mean().item()
+            mean2 = tensor2.float().mean().item()
+            mean_diff = abs(mean1 - mean2)
+            shape_matches.append((key, shape1, dtype1, dtype2, mean1, mean2, mean_diff))
+        
+        if dtype1 != dtype2:
+            dtype_mismatches.append((key, dtype1, dtype2))
     
     if shape_mismatches:
         print(f"\n{'='*60}")
@@ -91,12 +104,32 @@ def compare_weights(path1: str, path2: str, show_matching: bool = False):
             print(f"    Model 1: {shape1}")
             print(f"    Model 2: {shape2}")
     
+    if dtype_mismatches:
+        print(f"\n{'='*60}")
+        print(f"Dtype MISMATCHES ({len(dtype_mismatches)}):")
+        print(f"{'='*60}")
+        for key, dtype1, dtype2 in dtype_mismatches:
+            print(f"  {key}:")
+            print(f"    Model 1: {dtype1}")
+            print(f"    Model 2: {dtype2}")
+    
     if show_matching and shape_matches:
         print(f"\n{'='*60}")
         print(f"Matching parameters ({len(shape_matches)}):")
         print(f"{'='*60}")
-        for key, shape in shape_matches:
-            print(f"  {key}: {shape}")
+        for key, shape, dtype1, dtype2, mean1, mean2, mean_diff in shape_matches:
+            dtype_str = f"{dtype1}" if dtype1 == dtype2 else f"{dtype1} vs {dtype2}"
+            print(f"  {key}: {shape} [{dtype_str}]")
+            print(f"    Mean: {mean1:.6e} vs {mean2:.6e} (diff: {mean_diff:.6e})")
+    
+    # Show mean differences summary for non-zero diffs
+    significant_diffs = [(k, s, d) for k, s, _, _, _, _, d in shape_matches if d > 1e-6]
+    if significant_diffs:
+        print(f"\n{'='*60}")
+        print(f"Parameters with significant mean difference (>{1e-6}) ({len(significant_diffs)}):")
+        print(f"{'='*60}")
+        for key, shape, mean_diff in sorted(significant_diffs, key=lambda x: -x[2]):
+            print(f"  {key}: {shape}, mean_diff={mean_diff:.6e}")
     
     # Summary
     print(f"\n{'='*60}")
@@ -108,10 +141,14 @@ def compare_weights(path1: str, path2: str, show_matching: bool = False):
     print(f"  Only in model 2:      {len(only_in_2)}")
     print(f"  Common keys:          {len(common_keys)}")
     print(f"  Shape mismatches:     {len(shape_mismatches)}")
+    print(f"  Dtype mismatches:     {len(dtype_mismatches)}")
     print(f"  Shape matches:        {len(shape_matches)}")
+    print(f"  Significant mean diff:{len(significant_diffs)}")
     
     if not only_in_1 and not only_in_2 and not shape_mismatches:
         print("\n✓ Models have identical structure!")
+        if not dtype_mismatches and not significant_diffs:
+            print("✓ Models have identical dtypes and values!")
     else:
         print("\n✗ Models have structural differences.")
 
