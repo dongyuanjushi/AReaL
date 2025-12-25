@@ -576,7 +576,7 @@ def packed_tree_gather_logprobs(
     if input_ids.ndim != 1:
         raise ValueError("input_ids must be a 1D tensor of tree tokens.")
     if logits.ndim != 2 or logits.shape[0] != input_ids.shape[0]:
-        raise ValueError("logits must be 2D with first dim equal to len(input_ids).")
+        raise ValueError(f"logits must be 2D with first dim equal to len(input_ids), logits.shape={logits.shape}, input_ids.shape={input_ids.shape}")
 
     if temperature <= 0:
         raise ValueError("temperature must be positive.")

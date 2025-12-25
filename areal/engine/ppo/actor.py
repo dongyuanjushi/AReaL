@@ -85,6 +85,9 @@ class PPOActor:
                 input_ids = input_data["input_ids"]
                 sequence_ids = input_data["sequence_ids"]
                 seq_id_to_tree_indices = input_data["seq_id_to_tree_indices"]
+                pad_length = input_data.get("num_pad_tokens", 0)
+                if pad_length > 0:
+                    input_ids = input_ids[:-pad_length]
                 logprobs = packed_tree_gather_logprobs(
                     logits, input_ids, sequence_ids, seq_id_to_tree_indices, self.temperature
                 )
@@ -363,11 +366,18 @@ def grpo_loss_fn(
     prox_logp = input_data["prox_logp"]
 
     if enable_tree_training:
+        input_ids = input_data["input_ids"]
+        if "num_pad_tokens" in input_data:
+            pad_length = input_data["num_pad_tokens"]
+            if pad_length > 0:
+                input_ids = input_ids[:-pad_length]
+        sequence_ids = input_data["sequence_ids"]
+        seq_id_to_tree_indices = input_data["seq_id_to_tree_indices"]
         logprobs, entropy = packed_tree_gather_logprobs(
             logits,
-            input_data["input_ids"],
-            input_data["sequence_ids"],
-            input_data["seq_id_to_tree_indices"],
+            input_ids,
+            sequence_ids,
+            seq_id_to_tree_indices,
             temperature,
             calculate_entropy=True,
         )
