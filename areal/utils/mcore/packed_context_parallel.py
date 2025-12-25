@@ -139,9 +139,9 @@ def packed_context_parallel_forward(
     cu_seqlens = input_["cu_seqlens"]
     position_ids = input_["position_ids"]
     
+    global PACKED_FORWARD_PRINTED
     if not PACKED_FORWARD_PRINTED:
         logger.info(f"[debug] packed_context_parallel_forward input_ids shape: {input_ids.shape}, cu_seqlens: {cu_seqlens}, position_ids shape: {position_ids.shape}")
-        global PACKED_FORWARD_PRINTED
         PACKED_FORWARD_PRINTED = True
 
     input_ids_rmpad, packed_seq_params = preprocess_packed_seqs_context_parallel(
