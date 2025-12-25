@@ -593,8 +593,8 @@ if TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
         "trace.enabled": False,
         "triton.cudagraphs": False,
     }
-    logger.info("Compiled torch flex attention.")
     dynamic = os.environ.get("TREE_FLEX_DYNAMIC", "0") == "1"
+    logger.info("Compiled torch flex attention. Options: %s, dynamic: %s", str(torch_compile_options), str(dynamic))
     _flex_attention = torch.compile(
         flex_attention,
         dynamic=dynamic,
