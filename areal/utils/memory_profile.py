@@ -2,7 +2,7 @@ import os
 import torch
 import contextlib
 
-MEMORY_MAX_ENTRIES = 100000
+MEMORY_MAX_ENTRIES = 1000000
 STORE_BASE_DIR = "/storage/openpsi/users/meizhiyu.mzy/zeta/memory_profile"
 
 PROFILE_MEMORY = os.environ.get("PROFILE_MEMORY", "0") == "1"
