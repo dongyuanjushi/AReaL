@@ -685,6 +685,8 @@ if TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
         options=torch_compile_options
     )
 
+QKV_PRINTED = False
+
 class PytorchScaledDotProductAttention(torch.nn.Module):
     """ Pytorch implementation of scaled dot product attention 
     with xformer backend that supports arbitrary attention mask type
@@ -747,6 +749,12 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             )
         
         # query, key, value shape: [S, B, H, D] -> [B, H, S, D]
+        global QKV_PRINTED 
+        if not QKV_PRINTED:
+            logger.info(f"[debug] query shape: {query.shape} query dtype: {query.dtype}, memory cost: {query.element_size() * query.nelement() / (1024**2):.2f} MB")
+            logger.info(f"[debug] key shape: {key.shape} key dtype: {key.dtype}, memory cost: {key.element_size() * key.nelement() / (1024**2):.2f} MB")
+            logger.info(f"[debug] value shape: {value.shape} value dtype: {value.dtype}, memory cost: {value.element_size() * value.nelement() / (1024**2):.2f} MB")
+            QKV_PRINTED = True
         query = query.permute(1, 2, 0, 3) # .contiguous()
         key = key.permute(1, 2, 0, 3) # .contiguous()
         value = value.permute(1, 2, 0, 3) # .contiguous()
