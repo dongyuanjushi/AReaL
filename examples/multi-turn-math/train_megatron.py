@@ -252,6 +252,8 @@ def main(args):
     max_steps = total_epochs * steps_per_epoch
 
     for global_step in range(start_step, max_steps):
+        if global_step >= config.total_train_steps:
+            break
         epoch = global_step // steps_per_epoch
         step = global_step % steps_per_epoch
         step_info = StepInfo(

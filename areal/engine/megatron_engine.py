@@ -1097,15 +1097,18 @@ class MegatronEngine(TrainEngine):
                 if len(self.model) > 1
                 else micro_batch_generator[0]
             )
-            forward_backward_func(
-                forward_step_func=forward_step,
-                data_iterator=data_iterator,
-                model=self.model if len(self.model) > 1 else self.model[0],
-                num_microbatches=len(mb_list.padded_mbs),
-                seq_length=max_total_len,  # no use when input_shapes was set
-                micro_batch_size=1,  # no use when input_shapes was set
-                forward_only=False,
-            )
+            from areal.utils.memory_profile import profile_memory
+            profile_name = f"tree_full.pickle" if self.mcore_config.enable_tree_training else f"flat_full.pickle"
+            with profile_memory(profile_name):
+                forward_backward_func(
+                    forward_step_func=forward_step,
+                    data_iterator=data_iterator,
+                    model=self.model if len(self.model) > 1 else self.model[0],
+                    num_microbatches=len(mb_list.padded_mbs),
+                    seq_length=max_total_len,  # no use when input_shapes was set
+                    micro_batch_size=1,  # no use when input_shapes was set
+                    forward_only=False,
+                )
         with trace_scope("megatron_engine.train_batch.step"):
             update_successful, grad_norm, _ = self.optimizer.step()
         current_lr = self.optimizer.param_groups[0]["lr"]
