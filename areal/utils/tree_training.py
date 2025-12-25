@@ -1068,10 +1068,10 @@ def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]
     attention_mask = tree_input["attention_mask"]
     position_ids = tree_input["position_ids"]
 
+    global TREE_FORWARD_PRINTED
     if not TREE_FORWARD_PRINTED:
         logger.info(f"[debug] input_ids shape: {input_ids.shape} dtype: {input_ids.dtype}, memory cost: {input_ids.element_size() * input_ids.nelement() / (1024**2):.2f} MB")
         logger.info(f"[debug] attention_mask shape: {attention_mask.shape} dtype: {attention_mask.dtype}, memory cost: {attention_mask.element_size() * attention_mask.nelement() / (1024**2):.2f} MB")
-        global TREE_FORWARD_PRINTED
         TREE_FORWARD_PRINTED = True
     
     if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
