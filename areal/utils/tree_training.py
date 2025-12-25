@@ -1082,7 +1082,6 @@ def model_with_tree_attention_forward(
     model,
     tree_input: dict[str, torch.Tensor],
     dtype=torch.bfloat16,
-    remove_padding: bool = True,
 ):
     """ Patch LLMBridge.model_forward to support tree training with arbitrary attention mask.
     
@@ -1095,7 +1094,7 @@ def model_with_tree_attention_forward(
     input_ids = tree_input["input_ids"]
     attention_mask = tree_input["attention_mask"]
     position_ids = tree_input["position_ids"]
-    num_pad_tokens = tree_input.get("num_pad_tokens", 0) if remove_padding else 0
+    num_pad_tokens = tree_input.get("num_pad_tokens", 0)
 
     global TREE_FORWARD_PRINTED
     if not TREE_FORWARD_PRINTED:
