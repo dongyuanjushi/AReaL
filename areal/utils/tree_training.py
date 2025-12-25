@@ -801,23 +801,28 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
             ):
                 return attention_mask[q_idx, k_idx]
             
+            def arbitrary_score_mod(score, b, h, q_idx, k_idx):
+                mask_value = attention_mask[q_idx, k_idx]
+                score = score.masked_fill(~mask_value, float('-inf'))
+                return score
+            
             # print("[debug] create block mask", flush=True)
-            block_mask = create_block_mask(
-                arbitrary_mask,
-                B=1,  # Broadcast across batch
-                H=1,  # Broadcast across heads
-                Q_LEN=q_len,
-                KV_LEN=q_len,
-                BLOCK_SIZE=128,
-                device=query.device,
-                _compile=False  # Use compiled mask creation for speed
-            )
+            # block_mask = create_block_mask(
+            #     arbitrary_mask,
+            #     B=1,  # Broadcast across batch
+            #     H=1,  # Broadcast across heads
+            #     Q_LEN=q_len,
+            #     KV_LEN=q_len,
+            #     BLOCK_SIZE=128,
+            #     device=query.device,
+            #     _compile=False  # Use compiled mask creation for speed
+            # )
             # print("[debug] before flex attention", flush=True)
             output = _flex_attention(
                 query,
                 key,
                 value,
-                block_mask=block_mask,
+                score_mod=arbitrary_score_mod,
                 scale=self.softmax_scale,
                 enable_gqa=enable_gqa,
             )
