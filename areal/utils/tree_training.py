@@ -1058,6 +1058,8 @@ def patch_bridge_for_tree_training():
 
 ############################## Model Forward ##############################
 
+TREE_FORWARD_PRINTED = False
+
 @trace_perf("tree_training.model_with_tree_attention_forward")
 def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor], dtype=torch.bfloat16):
     """ Patch LLMBridge.model_forward to support tree training with arbitrary attention mask.
@@ -1065,6 +1067,12 @@ def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]
     input_ids = tree_input["input_ids"]
     attention_mask = tree_input["attention_mask"]
     position_ids = tree_input["position_ids"]
+
+    if not TREE_FORWARD_PRINTED:
+        logger.info(f"[debug] input_ids shape: {input_ids.shape} dtype: {input_ids.dtype}, memory cost: {input_ids.element_size() * input_ids.nelement() / (1024**2):.2f} MB")
+        logger.info(f"[debug] attention_mask shape: {attention_mask.shape} dtype: {attention_mask.dtype}, memory cost: {attention_mask.element_size() * attention_mask.nelement() / (1024**2):.2f} MB")
+        global TREE_FORWARD_PRINTED
+        TREE_FORWARD_PRINTED = True
     
     if TREE_ATTENTION_BACKEND_TYPE == "pytorch_xformer":
         # attention mask for Megatron TE Attention set True for positions to be masked.

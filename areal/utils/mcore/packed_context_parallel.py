@@ -5,6 +5,10 @@ import torch.distributed as dist
 from megatron.core import parallel_state as mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 from areal.utils.perf_tracer import trace_perf, trace_scope
+from areal.utils.logging import getLogger
+
+
+logger = getLogger(__name__)
 
 
 def preprocess_packed_seqs_context_parallel(
@@ -121,6 +125,8 @@ def postprocess_packed_seqs_context_parallel(
     return output_new
 
 
+PACKED_FORWARD_PRINTED = False
+
 @trace_perf("packed_context_parallel_forward")
 def packed_context_parallel_forward(
     model: torch.nn.Module,
@@ -132,6 +138,12 @@ def packed_context_parallel_forward(
     input_ids = input_["input_ids"]
     cu_seqlens = input_["cu_seqlens"]
     position_ids = input_["position_ids"]
+    
+    if not PACKED_FORWARD_PRINTED:
+        logger.info(f"[debug] packed_context_parallel_forward input_ids shape: {input_ids.shape}, cu_seqlens: {cu_seqlens}, position_ids shape: {position_ids.shape}")
+        global PACKED_FORWARD_PRINTED
+        PACKED_FORWARD_PRINTED = True
+
     input_ids_rmpad, packed_seq_params = preprocess_packed_seqs_context_parallel(
         input_ids, cu_seqlens
     )
