@@ -14,6 +14,8 @@ logger = logging.getLogger("Tree Training")
 
 ############################## Token Tree Construction ##############################
 
+SPARSE_BLOCK_SIZE = 128
+
 class TokenNode:
     def __init__(self, tree_id: int, token_id: int, node_id: int):
         self.tree_id = tree_id
@@ -358,6 +360,8 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         tuple[list[CompressedTokenNode], list[int], list[dict[str, Any]]]:
             ``roots`` of the packed token trees, token counts per tree, and tree-packed inputs with per-sequence indices.
     """
+    # if use block mask
+    assert max_tokens_per_tree % SPARSE_BLOCK_SIZE == 0, "max_tokens_per_tree must be a multiple of SPARSE_BLOCK_SIZE"
     roots, num_tree_tokens_list, tree_infos = greedy_build_tree(data, max_tokens_per_tree=max_tokens_per_tree)
     packed_trees: list[dict[str, Any]] = []
     input_template: torch.Tensor = data["input_ids"]
@@ -380,12 +384,16 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
         tree_endpoints_to_seq_info = tree_info["tree_endpoints_to_seq_info"]
 
         with trace_scope("tree_training.build_tree_input.pack_input_ids"):
-            input_ids: list[int] = torch.empty((num_tree_tokens,), dtype=input_template.dtype, device=input_template.device)
+            # Calculate padding needed to reach max_tokens_per_tree
+            num_pad_tokens = max_tokens_per_tree - num_tree_tokens
+            
+            input_ids: list[int] = torch.zeros((max_tokens_per_tree,), dtype=input_template.dtype, device=input_template.device)
             for (tree_start, tree_end), (seq_id, seq_start) in tree_endpoints_to_seq_info.items():
                 input_ids[tree_start:tree_end + 1] = input_template[seq_id][seq_start:seq_start + (tree_end - tree_start + 1)]
         
         with trace_scope("tree_training.build_tree_input.build_attention_mask"):
-            mask_tensor = mask_template.new_zeros((num_tree_tokens, num_tree_tokens))
+            # Create attention mask padded to max_tokens_per_tree
+            mask_tensor = mask_template.new_zeros((max_tokens_per_tree, max_tokens_per_tree))
             tril_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
             for seq_id in sequence_ids:
@@ -425,6 +433,8 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
             "seq_id_to_tree_indices": seq_id_to_tree_indices,
             "tree_endpoints_to_seq_info": tree_endpoints_to_seq_info,
             "cu_seqlens": cu_seqlens,
+            "num_tree_tokens": num_tree_tokens,
+            "num_pad_tokens": num_pad_tokens,
         }
         
         with trace_scope("tree_training.build_tree_input.pack_others"):
@@ -684,6 +694,7 @@ if TREE_ATTENTION_BACKEND_TYPE == "pytorch_flex":
         dynamic=dynamic,
         options=torch_compile_options
     )
+USE_BLOCK_MASK = os.environ.get("TREE_FLEX_USE_BLOCK_MASK", "0") == "1"
 
 QKV_PRINTED = False
 
@@ -815,22 +826,28 @@ class PytorchScaledDotProductAttention(torch.nn.Module):
                 return score
             
             # print("[debug] create block mask", flush=True)
-            # block_mask = create_block_mask(
-            #     arbitrary_mask,
-            #     B=1,  # Broadcast across batch
-            #     H=1,  # Broadcast across heads
-            #     Q_LEN=q_len,
-            #     KV_LEN=q_len,
-            #     BLOCK_SIZE=128,
-            #     device=query.device,
-            #     _compile=False  # Use compiled mask creation for speed
-            # )
+            if USE_BLOCK_MASK:
+                block_mask = create_block_mask(
+                    arbitrary_mask,
+                    B=1,  # Broadcast across batch
+                    H=1,  # Broadcast across heads
+                    Q_LEN=q_len,
+                    KV_LEN=q_len,
+                    BLOCK_SIZE=SPARSE_BLOCK_SIZE,
+                    device=query.device,
+                    _compile=False  # Use compiled mask creation for speed
+                )
+                score_mod = None
+            else:
+                block_mask = None
+                score_mod = arbitrary_score_mod
             # print("[debug] before flex attention", flush=True)
             output = _flex_attention(
                 query,
                 key,
                 value,
-                score_mod=arbitrary_score_mod,
+                block_mask=block_mask,
+                score_mod=score_mod,
                 scale=self.softmax_scale,
                 enable_gqa=enable_gqa,
             )
@@ -1061,12 +1078,24 @@ def patch_bridge_for_tree_training():
 TREE_FORWARD_PRINTED = False
 
 @trace_perf("tree_training.model_with_tree_attention_forward")
-def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor], dtype=torch.bfloat16):
+def model_with_tree_attention_forward(
+    model,
+    tree_input: dict[str, torch.Tensor],
+    dtype=torch.bfloat16,
+    remove_padding: bool = True,
+):
     """ Patch LLMBridge.model_forward to support tree training with arbitrary attention mask.
+    
+    Args:
+        model: The model to run forward pass on.
+        tree_input: Dictionary containing input_ids, attention_mask, position_ids, and optionally num_pad_tokens.
+        dtype: Data type for attention mask computation.
+        remove_padding: If True and num_pad_tokens is present in tree_input, remove padding tokens from output.
     """
     input_ids = tree_input["input_ids"]
     attention_mask = tree_input["attention_mask"]
     position_ids = tree_input["position_ids"]
+    num_pad_tokens = tree_input.get("num_pad_tokens", 0) if remove_padding else 0
 
     global TREE_FORWARD_PRINTED
     if not TREE_FORWARD_PRINTED:
@@ -1104,5 +1133,10 @@ def model_with_tree_attention_forward(model, tree_input: dict[str, torch.Tensor]
         position_ids=position_ids,
     )
     output = output.squeeze(0)  # Remove batch dimension
+    
+    # Remove padding tokens from output if requested
+    if num_pad_tokens > 0:
+        output = output[:-num_pad_tokens]
+    
     return output
 
