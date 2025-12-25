@@ -32,9 +32,9 @@ if not os.path.exists(MODEL_PATH):
 
 @pytest.fixture(scope="module")
 def mock_tree_input(
-    batch_size=5,
-    tree_tokens=30,
-    total_tokens=60,
+    batch_size=16,
+    tree_tokens=16384,
+    total_tokens=24576,
     device=current_platform.device_type,
 ):
     if batch_size <= 0:
