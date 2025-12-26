@@ -422,7 +422,7 @@ def build_tree_input(data: dict[str, Any], max_tokens_per_tree: int):
                 mask_tensor[seq_positions[rows], seq_positions[cols]] = True
         
         # Visualize attention mask
-        # _visualize_attention_mask(mask_tensor)
+        _visualize_attention_mask(mask_tensor)
         
         lens = [seq_lens[seq_id].item() for seq_id in sequence_ids]
         cu_seqlens = torch.cumsum(torch.tensor([0] + lens, dtype=torch.int32), dim=0)
