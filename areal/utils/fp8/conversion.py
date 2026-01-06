@@ -3,6 +3,8 @@
 import torch
 from megatron.core.fp8_utils import is_float8tensor
 
+from areal.platforms import current_platform
+
 
 def torch_fp8_to_te_fp8(
     pytorch_fp8_tensor: torch.Tensor,
@@ -36,6 +38,7 @@ def torch_fp8_to_te_fp8(
         target_te_tensor._rowwise_scale_inv[
             : scale_inv_shape[0], : scale_inv_shape[1]
         ].copy_(scale_inv, non_blocking=False)
+        current_platform.synchronize()
         with torch.cuda.device(target_te_tensor.device):
             target_te_tensor._create_columnwise()
     else:
