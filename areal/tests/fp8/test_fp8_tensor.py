@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from areal.utils.megatron import FP8BlockwiseTensorHelper
+from areal.utils.fp8 import FP8BlockwiseTensorHelper
 
 
 @pytest.fixture(scope="module")
