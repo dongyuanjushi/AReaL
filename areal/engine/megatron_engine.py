@@ -150,7 +150,11 @@ class MegatronEngine(TrainEngine):
         self.is_offload: bool = False
         self.enable_fp8: bool = self.config.megatron.fp8_config is not None
         self.quantization_config: dict[str, int | str | list[str]] | None = None
-        self.fp8_direct_convert: bool = True
+        self.fp8_direct_convert: bool = (
+            self.config.megatron.fp8_config.fp8_direct_convert
+            if self.config.megatron.fp8_config is not None
+            else False
+        )
 
     def create_process_group(self, parallel_strategy: ParallelStrategy | None = None):
         if parallel_strategy is None:
