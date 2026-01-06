@@ -1123,7 +1123,6 @@ class SGLangConfig:
     # and passed as `model_loader_extra_config` to SGLang.
     enable_multithread_load: bool = False
     enable_fast_load: bool = False
-    quantization: str | None = None
 
     # Use staticmethod to make OmegaConf happy.
     @staticmethod
