@@ -66,8 +66,8 @@ class FP8BlockwiseTensorHelper(torch.Tensor):
         )
         # Same number of dimensions
         if len(old_data_shape) == len(new_data_shape):
-            assert old_scale_shape == new_data_shape, (
-                "old_scale_shape and new_data_shape must be the same"
+            assert old_data_shape == new_data_shape, (
+                "old_data_shape and new_data_shape must be the same"
             )
             return old_scale_shape
 
