@@ -112,7 +112,9 @@ def all_gather_param(
 
 
 # Adapted from slime
-def remove_padding(name: str, param: Parameter | Tensor, vocab_size: int):
+def remove_padding(
+    name: str, param: Parameter | Tensor | FP8BlockwiseTensorHelper, vocab_size: int
+):
     if (
         name == "module.module.embedding.word_embeddings.weight"
         or name == "module.module.output_layer.weight"
@@ -123,7 +125,9 @@ def remove_padding(name: str, param: Parameter | Tensor, vocab_size: int):
 
 # Adapted from slime
 def convert_qwen3moe_to_hf(
-    tf_config: TransformerConfig, name: str, param: Parameter | Tensor
+    tf_config: TransformerConfig,
+    name: str,
+    param: Parameter | Tensor | FP8BlockwiseTensorHelper,
 ):
     if name == "module.module.embedding.word_embeddings.weight":
         return [("model.embed_tokens.weight", param)]
@@ -278,7 +282,9 @@ def convert_qwen3moe_to_hf(
 
 # Adapted from slime
 def convert_qwen2_to_hf(
-    tf_config: TransformerConfig, name: str, param: Parameter | Tensor
+    tf_config: TransformerConfig,
+    name: str,
+    param: Parameter | Tensor | FP8BlockwiseTensorHelper,
 ):
     if name == "module.module.embedding.word_embeddings.weight":
         return [("model.embed_tokens.weight", param)]
@@ -366,7 +372,9 @@ def convert_qwen2_to_hf(
 
 # Adapted from slime
 def convert_deepseekv3_to_hf(
-    tf_config: TransformerConfig, name: str, param: Parameter | Tensor
+    tf_config: TransformerConfig,
+    name: str,
+    param: Parameter | Tensor | FP8BlockwiseTensorHelper,
 ):
     if name == "module.module.embedding.word_embeddings.weight":
         return [("model.embed_tokens.weight", param)]
