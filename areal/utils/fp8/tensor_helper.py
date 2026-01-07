@@ -1,6 +1,9 @@
 import math
 
 import torch
+from megatron.core.fp8_utils import is_float8tensor
+
+from areal.platforms import current_platform
 
 
 class FP8BlockwiseTensorHelper(torch.Tensor):
@@ -272,6 +275,44 @@ class FP8BlockwiseTensorHelper(torch.Tensor):
         scale_inv = rowwise_scale_inv[:actual_scale_rows, :actual_scale_cols].clone()
 
         return torch_fp8_tensor, scale_inv
+
+    def to_te_fp8_inplace(self, target_te_tensor: torch.Tensor) -> None:
+        """Convert FP8BlockwiseTensorHelper to Transformer Engine Float8BlockwiseQTensor format inplace.
+
+        This function copies the data and scale_inv from this FP8BlockwiseTensorHelper
+        to an existing TE Float8BlockwiseQTensor.
+
+        Args:
+            target_te_tensor: Target TranformerEngine Float8BlockwiseQTensor to copy into
+        """
+
+        # Validate target tensor
+        if not is_float8tensor(target_te_tensor):
+            raise ValueError(
+                "target_te_tensor must be a Transformer Engine Float8Tensor"
+            )
+
+        # For Float8BlockwiseQTensor, copy rowwise_data and rowwise_scale_inv
+        if hasattr(target_te_tensor, "_rowwise_data") and hasattr(
+            target_te_tensor, "_rowwise_scale_inv"
+        ):
+            assert self._rowwise_data.shape == target_te_tensor._rowwise_data.shape
+            # rowwise_data is stored in uint8 format
+            target_te_tensor._rowwise_data.copy_(
+                self._rowwise_data.view(torch.uint8), non_blocking=False
+            )
+            scale_inv_shape = self._rowwise_scale_inv.shape
+            assert len(scale_inv_shape) == 2
+            target_te_tensor._rowwise_scale_inv[
+                : scale_inv_shape[0], : scale_inv_shape[1]
+            ].copy_(self._rowwise_scale_inv, non_blocking=False)
+            current_platform.synchronize()
+            with torch.cuda.device(target_te_tensor.device):
+                target_te_tensor._create_columnwise()
+        else:
+            raise RuntimeError(
+                "target_te_tensor must be a Transformer Engine Float8BlockwiseQTensor"
+            )
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
